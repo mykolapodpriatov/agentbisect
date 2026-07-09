@@ -114,7 +114,7 @@ A bisect runs over exactly one axis at a time; each candidate overrides a single
 the captured config (single-axis isolation):
 
 - `ModelListAxis(models)` — order = list order.
-- `PromptGitAxis(repo, path, rev)` — order = git history (old→new) of a prompt file.
+- `PromptGitAxis(repo_path, file_path, rev)` — order = git history (old→new) of a prompt file.
 - `ToolSchemaAxis(versions)` — ordered tool-schema sets.
 - `RetrievalAxis(snapshots)` — ordered retrieval snapshot refs.
 
