@@ -1,11 +1,19 @@
 """Render a first-bad-change report: culprit + axis + minimal repro + behavioral diff.
 
-Two renderers are provided: :func:`render_markdown` (stable, test-friendly, used by the
-CLI's plain output) and :func:`render_rich` (a pretty terminal panel). Both consume a
-:class:`~agentbisect.driver.BisectionOutcome`.
+Three renderers are provided, all consuming a
+:class:`~agentbisect.driver.BisectionOutcome`:
+
+* :func:`render_markdown` -- stable, test-friendly Markdown (the CLI's ``--markdown``).
+* :func:`render_rich` -- a pretty terminal panel (the CLI's default).
+* :func:`render_json` -- a stable, sorted, machine-readable JSON document (the CLI's
+  ``--json``) carrying exactly the facts :func:`render_markdown` reports, so the two
+  renderers never drift.
 """
 
 from __future__ import annotations
+
+import json
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -15,7 +23,7 @@ from .diff import BehavioralDiff
 from .driver import BisectionOutcome
 from .types import BisectResult, Trace
 
-__all__ = ["render_markdown", "render_rich"]
+__all__ = ["render_json", "render_markdown", "render_rich"]
 
 
 def _diff_lines(bdiff: BehavioralDiff) -> list[str]:
@@ -86,6 +94,68 @@ def render_markdown(outcome: BisectionOutcome) -> str:
     for cand, verdict in result.steps_tested:
         out.append(f"- order {cand.order} `{cand.ref}` -> {verdict.value}")
     return "\n".join(out) + "\n"
+
+
+def _diff_json(bdiff: BehavioralDiff | None) -> dict[str, Any] | None:
+    """Serialize a behavioral diff, mirroring exactly what :func:`_diff_lines` reports."""
+    if bdiff is None:
+        return None
+    return {
+        "is_empty": bdiff.is_empty,
+        "first_divergence": bdiff.first_divergence,
+        "final_output_changed": bdiff.final_output_changed,
+        "left_final": bdiff.left_final,
+        "right_final": bdiff.right_final,
+        # Only the diverging steps, matching the Markdown renderer's `if not same` filter.
+        "differing_steps": [
+            {"index": sd.index, "left": sd.left, "right": sd.right}
+            for sd in bdiff.steps
+            if not sd.same
+        ],
+    }
+
+
+def _repro_json(repro: Trace | None) -> dict[str, Any] | None:
+    """Serialize a minimal repro trace, mirroring exactly what :func:`_repro_lines` reports."""
+    if repro is None:
+        return None
+    return {
+        "num_steps": len(repro.steps),
+        "final_output": repro.final_output,
+        "steps": [{"index": step.index, "kind": step.kind} for step in repro.steps],
+    }
+
+
+def render_json(outcome: BisectionOutcome) -> str:
+    """Render the bisection outcome as a stable, sorted, machine-readable JSON document.
+
+    The schema carries exactly the facts :func:`render_markdown` reports -- axis, probes,
+    the passthrough/artifact-availability flags, the first-bad/last-good refs (or ``null``),
+    the ambiguous range, every tested step's order/ref/verdict, and the behavioral diff and
+    minimal repro -- so the JSON and Markdown renderers never drift. Keys are sorted, so the
+    output is byte-stable for a given outcome.
+    """
+    result: BisectResult = outcome.result
+    payload: dict[str, Any] = {
+        "axis": result.axis,
+        "probes": result.probes,
+        "used_passthrough": outcome.used_passthrough,
+        "artifacts_unavailable": outcome.artifacts_unavailable,
+        "first_bad": result.first_bad.ref if result.first_bad is not None else None,
+        "last_good": result.last_good.ref if result.last_good is not None else None,
+        "ambiguous_range": (
+            [result.ambiguous_range[0].ref, result.ambiguous_range[1].ref]
+            if result.ambiguous_range is not None
+            else None
+        ),
+        "steps_tested": [
+            {"order": cand.order, "ref": cand.ref, "verdict": verdict.value}
+            for cand, verdict in result.steps_tested
+        ],
+        "behavioral_diff": _diff_json(outcome.behavioral_diff),
+        "minimal_repro": _repro_json(outcome.minimal_repro),
+    }
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def render_rich(outcome: BisectionOutcome, console: Console | None = None) -> None:

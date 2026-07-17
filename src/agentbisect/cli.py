@@ -28,7 +28,7 @@ from .config import ConfigError, load_project_config
 from .diff import diff as diff_traces
 from .driver import run_bisection
 from .mock_tools import DivergencePolicy
-from .report import render_markdown, render_rich
+from .report import render_json, render_markdown, render_rich
 
 app = typer.Typer(
     add_completion=False,
@@ -127,8 +127,14 @@ def bisect(
         DivergencePolicy, typer.Option("--policy", help="Divergence policy.")
     ] = DivergencePolicy.SKIP,
     markdown: Annotated[bool, typer.Option("--markdown", help="Emit Markdown instead.")] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON (pipe-safe).")
+    ] = False,
 ) -> None:
     """Bisect an axis over a captured bundle and report the first bad change."""
+    if markdown and json_output:
+        _fail("--markdown and --json are mutually exclusive", EXIT_USAGE)
+
     try:
         run_bundle = load_bundle(bundle)
         project = load_project_config(config)
@@ -144,7 +150,10 @@ def bisect(
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
 
-    if markdown:
+    if json_output:
+        # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
+        print(render_json(outcome))
+    elif markdown:
         console.print(render_markdown(outcome))
     else:
         render_rich(outcome, console)
@@ -228,8 +237,15 @@ def report(
     config: Annotated[Path, typer.Option("--config", help="Project config .py.")],
     axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval|params.")],
     over: Annotated[str, typer.Option("--over", help="Axis spec (see docs).")],
+    markdown: Annotated[bool, typer.Option("--markdown", help="Emit Markdown (default).")] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON (pipe-safe).")
+    ] = False,
 ) -> None:
-    """Run a bisection and emit a Markdown culprit report."""
+    """Run a bisection and emit a culprit report (Markdown by default, or ``--json``)."""
+    if markdown and json_output:
+        _fail("--markdown and --json are mutually exclusive", EXIT_USAGE)
+
     try:
         run_bundle = load_bundle(bundle)
         project = load_project_config(config)
@@ -242,7 +258,11 @@ def report(
         outcome = run_bisection(runner, run_bundle, candidates, oracle)
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
-    console.print(render_markdown(outcome))
+    if json_output:
+        # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
+        print(render_json(outcome))
+    else:
+        console.print(render_markdown(outcome))
 
 
 if __name__ == "__main__":  # pragma: no cover
