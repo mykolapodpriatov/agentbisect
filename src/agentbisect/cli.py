@@ -20,7 +20,7 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
-from .axes import Axis, ModelListAxis, PromptGitAxis, RetrievalAxis
+from .axes import Axis, ModelListAxis, ParamsAxis, PromptGitAxis, RetrievalAxis
 from .bisect import NonMonotonicError, UntestableEndpointError
 from .bundle import BundleError, load_bundle, save_bundle
 from .capture import capture
@@ -69,6 +69,22 @@ def capture_cmd(
     console.print(f"[green]captured[/] {len(bundle.trace.steps)} step(s) -> {out}")
 
 
+def _coerce_param_value(text: str) -> int | float | str:
+    """Coerce a CLI params value to ``int``/``float`` where possible, else keep the string.
+
+    So ``max_tokens=256`` yields the int ``256``, ``top_p=0.9`` the float ``0.9``, and
+    ``reasoning_effort=high`` the string ``"high"``.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
 def _build_axis(axis: str, over: str, bundle_dir: Path) -> Axis:
     """Construct an axis provider from the ``--axis`` / ``--over`` CLI options."""
     if axis == "model":
@@ -82,19 +98,30 @@ def _build_axis(axis: str, over: str, bundle_dir: Path) -> Axis:
     if axis == "retrieval":
         snaps = [s.strip() for s in over.split(",") if s.strip()]
         return RetrievalAxis(snaps)
+    if axis == "params":
+        # over = "<key>=<v1>,<v2>,..."
+        key, sep, raw = over.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise ConfigError(
+                "the 'params' axis spec must be '<key>=<v1>,<v2>,...' "
+                "(e.g. max_tokens=256,512,1024)"
+            )
+        values = [_coerce_param_value(v.strip()) for v in raw.split(",") if v.strip()]
+        return ParamsAxis(key, values)
     if axis == "tools":
         raise ConfigError(
             "the 'tools' axis requires schema objects; drive it via the library "
             "(ToolSchemaAxis) rather than the CLI string form"
         )
-    raise ConfigError(f"unknown axis {axis!r}; expected model|prompt|tools|retrieval")
+    raise ConfigError(f"unknown axis {axis!r}; expected model|prompt|tools|retrieval|params")
 
 
 @app.command()
 def bisect(
     bundle: Annotated[Path, typer.Option("--bundle", help="Bundle directory.")],
     config: Annotated[Path, typer.Option("--config", help="Project config .py (for the oracle).")],
-    axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval.")],
+    axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval|params.")],
     over: Annotated[str, typer.Option("--over", help="Axis spec (see docs).")],
     policy: Annotated[
         DivergencePolicy, typer.Option("--policy", help="Divergence policy.")
@@ -199,7 +226,7 @@ def diff(
 def report(
     bundle: Annotated[Path, typer.Option("--bundle", help="Bundle directory.")],
     config: Annotated[Path, typer.Option("--config", help="Project config .py.")],
-    axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval.")],
+    axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval|params.")],
     over: Annotated[str, typer.Option("--over", help="Axis spec (see docs).")],
 ) -> None:
     """Run a bisection and emit a Markdown culprit report."""

@@ -338,6 +338,33 @@ def test_bisect_retrieval_axis_runs(tmp_path: Path) -> None:
     assert res.exit_code == 3, res.output
 
 
+def test_bisect_params_axis_reports_first_bad(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    # A ParamsAxis over the FakeAgent's 'final' output: the first value keeps the refund
+    # clause (GOOD), the second drops it (BAD) -> a monotonic good->bad transition. The
+    # value strings themselves contain '=', exercising first-'=' key/value splitting.
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--markdown",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert "First bad change" in res.output
+    assert "final=refund=no" in res.output
+
+
 def test_replay_command_override_variants(tmp_path: Path) -> None:
     cfg = _write_config(tmp_path)
     out = tmp_path / "bundle"

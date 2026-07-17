@@ -117,6 +117,10 @@ the captured config (single-axis isolation):
 - `PromptGitAxis(repo, path, rev)` — order = git history (old→new) of a prompt file.
 - `ToolSchemaAxis(versions)` — ordered tool-schema sets.
 - `RetrievalAxis(snapshots)` — ordered retrieval snapshot refs.
+- `ParamsAxis(key, values)` — ordered values for one sampling/params key (e.g.
+  `max_tokens`, `top_p`, `reasoning_effort`), overriding `params[key]` only. `temperature`
+  is rejected: replay forces it to `0`, so bisecting it would be a silent no-op. CLI:
+  `--axis params --over 'max_tokens=256,512,1024'`.
 
 ## Judges
 
