@@ -198,6 +198,68 @@ def test_diff_command_missing_bundle_usage_error(tmp_path: Path) -> None:
     assert res.exit_code == 4, res.output
 
 
+def _two_bundles(tmp_path: Path) -> tuple[Path, Path]:
+    """Save two bundles with the same step-0 content but different final outputs."""
+    from agentbisect.bundle import make_bundle, save_bundle
+    from agentbisect.types import AgentConfig, LlmStep, Trace
+
+    cfg_obj = AgentConfig(system_prompt="p", model="m")
+    a_dir = save_bundle(
+        make_bundle(
+            config=cfg_obj,
+            trace=Trace(steps=(LlmStep(index=0, role="a", content="x"),), final_output="good"),
+            label="a",
+        ),
+        tmp_path / "a",
+    )
+    b_dir = save_bundle(
+        make_bundle(
+            config=cfg_obj,
+            trace=Trace(steps=(LlmStep(index=0, role="a", content="y"),), final_output="bad"),
+            label="b",
+        ),
+        tmp_path / "b",
+    )
+    return a_dir, b_dir
+
+
+def test_diff_command_json_output_is_machine_readable(tmp_path: Path) -> None:
+    a_dir, b_dir = _two_bundles(tmp_path)
+    res = runner.invoke(app, ["diff", str(a_dir), str(b_dir), "--json"])
+    assert res.exit_code == 0, res.output
+    # Pipe-safe: the bracketed step array is not swallowed by Rich markup.
+    data = json.loads(res.output)
+    assert data["is_empty"] is False
+    assert data["first_divergence"] == 0
+    assert data["final_output_changed"] is True
+    assert data["left_final"] == "good"
+    assert data["right_final"] == "bad"
+    assert [s["index"] for s in data["differing_steps"]] == [0]
+
+
+def test_diff_command_markdown_output(tmp_path: Path) -> None:
+    a_dir, b_dir = _two_bundles(tmp_path)
+    res = runner.invoke(app, ["diff", str(a_dir), str(b_dir), "--markdown"])
+    assert res.exit_code == 0, res.output
+    assert "# behavioral diff" in res.output
+    assert "Differing steps" in res.output
+
+
+def test_diff_command_json_empty_diff(tmp_path: Path) -> None:
+    a_dir, _ = _two_bundles(tmp_path)
+    res = runner.invoke(app, ["diff", str(a_dir), str(a_dir), "--json"])
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["is_empty"] is True
+    assert data["differing_steps"] == []
+
+
+def test_diff_command_json_and_markdown_mutually_exclusive(tmp_path: Path) -> None:
+    a_dir, b_dir = _two_bundles(tmp_path)
+    res = runner.invoke(app, ["diff", str(a_dir), str(b_dir), "--json", "--markdown"])
+    assert res.exit_code == 4, res.output
+
+
 def test_replay_command_surfaces_divergence_notes(tmp_path: Path) -> None:
     # Save a bundle whose recorded trace has one tool call, then replay a prompt that
     # makes the FakeAgent call a DIFFERENT tool -> divergence with a note.
@@ -304,13 +366,142 @@ def test_bisect_unknown_axis_usage_error(tmp_path: Path) -> None:
     assert res.exit_code == 4, res.output
 
 
-def test_bisect_tools_axis_cli_unsupported(tmp_path: Path) -> None:
+def _write_schema_file(path: Path, name: str, version: str) -> Path:
+    """Write a tiny, offline tool-schema JSON file (a one-tool version) and return it."""
+    path.write_text(
+        json.dumps([{"name": name, "schema": {"type": "object"}, "version": version}]),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_build_axis_tools_loads_schema_files(tmp_path: Path) -> None:
+    from agentbisect.axes import ToolSchemaAxis
+    from agentbisect.cli import _build_axis
+    from agentbisect.types import AgentConfig
+
+    f1 = _write_schema_file(tmp_path / "v1.json", "search", "1")
+    f2 = _write_schema_file(tmp_path / "v2.json", "search", "2")
+    axis = _build_axis("tools", f"{f1},{f2}", tmp_path)
+    assert isinstance(axis, ToolSchemaAxis)
+
+    base = AgentConfig(system_prompt="P", model="m", retrieval_ref="snap")
+    cands = axis.candidates(base)
+    # Ordered old -> new by file order, overriding ONLY tool_schemas (single-axis isolation).
+    assert [c.order for c in cands] == [0, 1]
+    assert cands[0].config.tool_schemas[0].name == "search"
+    assert cands[0].config.tool_schemas[0].version == "1"
+    assert cands[1].config.tool_schemas[0].version == "2"
+    for c in cands:
+        assert c.axis == "tools"
+        assert c.config.system_prompt == "P"
+        assert c.config.model == "m"
+        assert c.config.retrieval_ref == "snap"
+
+
+def test_bisect_tools_axis_from_files_runs(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    f1 = _write_schema_file(tmp_path / "v1.json", "search", "1")
+    f2 = _write_schema_file(tmp_path / "v2.json", "search", "2")
+    # tool_schemas do not alter the FakeAgent output, so both endpoints replay GOOD ->
+    # non-monotonic (exit 3). This exercises the tools-axis CLI construction path.
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "tools",
+            "--over",
+            f"{f1},{f2}",
+        ],
+    )
+    assert res.exit_code == 3, res.output
+
+
+def test_bisect_tools_axis_missing_file_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    # The tools axis is now CLI-reachable via schema files; a nonexistent file is a clean
+    # usage error (exit 4), never a crash.
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "tools",
+            "--over",
+            str(tmp_path / "nope.json"),
+        ],
+    )
+    assert res.exit_code == 4, res.output
+    assert "error" in res.output.lower()
+
+
+def test_bisect_tools_axis_invalid_json_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "tools",
+            "--over",
+            str(bad),
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
+def test_bisect_tools_axis_malformed_schema_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    # Valid JSON, but not an array of ToolSchema objects (the required 'name' is missing).
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([{"schema": {}}]), encoding="utf-8")
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "tools",
+            "--over",
+            str(bad),
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
+def test_bisect_tools_axis_empty_spec_usage_error(tmp_path: Path) -> None:
     cfg = _write_config(tmp_path)
     out = tmp_path / "bundle"
     runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
     res = runner.invoke(
         app,
-        ["bisect", "--bundle", str(out), "--config", str(cfg), "--axis", "tools", "--over", "x"],
+        ["bisect", "--bundle", str(out), "--config", str(cfg), "--axis", "tools", "--over", " , "],
     )
     assert res.exit_code == 4, res.output
 
@@ -409,6 +600,107 @@ def test_bisect_json_and_markdown_mutually_exclusive(tmp_path: Path) -> None:
             "--over",
             "final=refund=yes,refund=no",
             "--json",
+            "--markdown",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
+def test_bisect_html_emits_self_contained_document(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--html",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    # A self-contained static HTML artifact printed verbatim (not swallowed by Rich markup).
+    assert res.output.lstrip().startswith("<!DOCTYPE html>")
+    assert "First bad change" in res.output
+    assert "final=refund=no" in res.output
+
+
+def test_bisect_html_mutually_exclusive_with_json(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--html",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
+def test_report_html_emits_self_contained_document(tmp_path: Path, temp_git_repo) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    versions = [
+        "You are support. Always state the refund policy.",
+        "You are support. Be brief.",  # drops refund -> bad
+    ]
+    repo = temp_git_repo("system.txt", versions)
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "prompt",
+            "--over",
+            f"{repo}:system.txt",
+            "--html",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert res.output.lstrip().startswith("<!DOCTYPE html>")
+    assert "First bad change" in res.output
+
+
+def test_report_html_and_markdown_mutually_exclusive(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--html",
             "--markdown",
         ],
     )

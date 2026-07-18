@@ -8,7 +8,7 @@ from rich.console import Console
 
 from agentbisect.diff import diff
 from agentbisect.driver import BisectionOutcome
-from agentbisect.report import render_json, render_markdown, render_rich
+from agentbisect.report import render_html, render_json, render_markdown, render_rich
 from agentbisect.types import AgentConfig, BisectResult, Candidate, LlmStep, Trace, Verdict
 
 
@@ -175,6 +175,59 @@ def test_json_is_sorted_and_stable() -> None:
     assert out == render_json(_first_bad_outcome())
     top_level_keys = list(json.loads(out).keys())
     assert top_level_keys == sorted(top_level_keys)
+
+
+def test_html_first_bad_carries_markdown_facts() -> None:
+    doc = render_html(_first_bad_outcome())
+    # A self-contained document (inlined styles, no external assets).
+    assert doc.startswith("<!DOCTYPE html>")
+    assert doc.rstrip().endswith("</html>")
+    assert "<style>" in doc and "href=" not in doc and "<script" not in doc
+    # The same facts the Markdown renderer carries.
+    assert "First bad change" in doc
+    assert "bad-sha" in doc
+    assert "Last good" in doc and "good-sha" in doc
+    assert "Behavioral diff" in doc
+    assert "Minimal reproducing trace" in doc
+    assert "Candidates tested" in doc
+    # Verdicts are surfaced in the tested-candidates table.
+    assert ">good<" in doc and ">bad<" in doc
+
+
+def test_html_ambiguous_surfaces_range_and_passthrough() -> None:
+    doc = render_html(_ambiguous_outcome())
+    assert "ambiguous range" in doc
+    assert "lo-sha" in doc and "hi-sha" in doc
+    assert "LIVE tool execution" in doc  # passthrough note surfaced
+
+
+def test_html_escapes_untrusted_refs() -> None:
+    # A ref carrying HTML metacharacters must be escaped, never injected as raw markup.
+    base = AgentConfig(system_prompt="p", model="m")
+    hostile = Candidate(axis="prompt", ref="<script>alert(1)</script>&", order=1, config=base)
+    last_good = _cand(0, "good-sha")
+    result = BisectResult(
+        axis="prompt",
+        first_bad=hostile,
+        last_good=last_good,
+        steps_tested=((last_good, Verdict.GOOD), (hostile, Verdict.BAD)),
+        probes=2,
+    )
+    outcome = BisectionOutcome(
+        result, minimal_repro=None, behavioral_diff=None, used_passthrough=False
+    )
+    doc = render_html(outcome)
+    assert "<script>alert(1)</script>" not in doc
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;&amp;" in doc
+
+
+def test_html_empty_diff_branch() -> None:
+    doc = render_html(_empty_diff_outcome())
+    assert "no behavioral difference detected" in doc
+
+
+def test_html_is_stable() -> None:
+    assert render_html(_first_bad_outcome()) == render_html(_first_bad_outcome())
 
 
 def test_markdown_first_bad_with_empty_diff() -> None:
