@@ -28,7 +28,14 @@ from .config import ConfigError, load_project_config
 from .diff import diff as diff_traces
 from .driver import run_bisection
 from .mock_tools import DivergencePolicy
-from .report import render_html, render_json, render_markdown, render_rich
+from .report import (
+    render_diff_json,
+    render_diff_markdown,
+    render_html,
+    render_json,
+    render_markdown,
+    render_rich,
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -218,14 +225,30 @@ def replay(
 def diff(
     a: Annotated[Path, typer.Argument(help="First bundle directory.")],
     b: Annotated[Path, typer.Argument(help="Second bundle directory.")],
+    markdown: Annotated[bool, typer.Option("--markdown", help="Emit Markdown instead.")] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON (pipe-safe).")
+    ] = False,
 ) -> None:
     """Print a step-aligned behavioral diff between two bundles' traces."""
+    if markdown and json_output:
+        _fail("--markdown and --json are mutually exclusive", EXIT_USAGE)
     try:
         bundle_a = load_bundle(a)
         bundle_b = load_bundle(b)
     except BundleError as exc:
         _fail(str(exc), EXIT_USAGE)
     bdiff = diff_traces(bundle_a.trace, bundle_b.trace)
+
+    if json_output:
+        # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
+        print(render_diff_json(bdiff))
+        return
+    if markdown:
+        console.print(render_diff_markdown(bdiff))
+        return
+
+    # Human-readable default (unchanged).
     if bdiff.is_empty:
         console.print("[green]no behavioral difference[/]")
         return

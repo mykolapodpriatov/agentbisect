@@ -198,6 +198,68 @@ def test_diff_command_missing_bundle_usage_error(tmp_path: Path) -> None:
     assert res.exit_code == 4, res.output
 
 
+def _two_bundles(tmp_path: Path) -> tuple[Path, Path]:
+    """Save two bundles with the same step-0 content but different final outputs."""
+    from agentbisect.bundle import make_bundle, save_bundle
+    from agentbisect.types import AgentConfig, LlmStep, Trace
+
+    cfg_obj = AgentConfig(system_prompt="p", model="m")
+    a_dir = save_bundle(
+        make_bundle(
+            config=cfg_obj,
+            trace=Trace(steps=(LlmStep(index=0, role="a", content="x"),), final_output="good"),
+            label="a",
+        ),
+        tmp_path / "a",
+    )
+    b_dir = save_bundle(
+        make_bundle(
+            config=cfg_obj,
+            trace=Trace(steps=(LlmStep(index=0, role="a", content="y"),), final_output="bad"),
+            label="b",
+        ),
+        tmp_path / "b",
+    )
+    return a_dir, b_dir
+
+
+def test_diff_command_json_output_is_machine_readable(tmp_path: Path) -> None:
+    a_dir, b_dir = _two_bundles(tmp_path)
+    res = runner.invoke(app, ["diff", str(a_dir), str(b_dir), "--json"])
+    assert res.exit_code == 0, res.output
+    # Pipe-safe: the bracketed step array is not swallowed by Rich markup.
+    data = json.loads(res.output)
+    assert data["is_empty"] is False
+    assert data["first_divergence"] == 0
+    assert data["final_output_changed"] is True
+    assert data["left_final"] == "good"
+    assert data["right_final"] == "bad"
+    assert [s["index"] for s in data["differing_steps"]] == [0]
+
+
+def test_diff_command_markdown_output(tmp_path: Path) -> None:
+    a_dir, b_dir = _two_bundles(tmp_path)
+    res = runner.invoke(app, ["diff", str(a_dir), str(b_dir), "--markdown"])
+    assert res.exit_code == 0, res.output
+    assert "# behavioral diff" in res.output
+    assert "Differing steps" in res.output
+
+
+def test_diff_command_json_empty_diff(tmp_path: Path) -> None:
+    a_dir, _ = _two_bundles(tmp_path)
+    res = runner.invoke(app, ["diff", str(a_dir), str(a_dir), "--json"])
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["is_empty"] is True
+    assert data["differing_steps"] == []
+
+
+def test_diff_command_json_and_markdown_mutually_exclusive(tmp_path: Path) -> None:
+    a_dir, b_dir = _two_bundles(tmp_path)
+    res = runner.invoke(app, ["diff", str(a_dir), str(b_dir), "--json", "--markdown"])
+    assert res.exit_code == 4, res.output
+
+
 def test_replay_command_surfaces_divergence_notes(tmp_path: Path) -> None:
     # Save a bundle whose recorded trace has one tool call, then replay a prompt that
     # makes the FakeAgent call a DIFFERENT tool -> divergence with a note.

@@ -26,7 +26,14 @@ from .diff import BehavioralDiff
 from .driver import BisectionOutcome
 from .types import BisectResult, Trace
 
-__all__ = ["render_html", "render_json", "render_markdown", "render_rich"]
+__all__ = [
+    "render_diff_json",
+    "render_diff_markdown",
+    "render_html",
+    "render_json",
+    "render_markdown",
+    "render_rich",
+]
 
 
 def _diff_lines(bdiff: BehavioralDiff) -> list[str]:
@@ -99,10 +106,12 @@ def render_markdown(outcome: BisectionOutcome) -> str:
     return "\n".join(out) + "\n"
 
 
-def _diff_json(bdiff: BehavioralDiff | None) -> dict[str, Any] | None:
-    """Serialize a behavioral diff, mirroring exactly what :func:`_diff_lines` reports."""
-    if bdiff is None:
-        return None
+def _diff_dict(bdiff: BehavioralDiff) -> dict[str, Any]:
+    """Serialize a behavioral diff to a plain dict, mirroring :func:`_diff_lines`.
+
+    Shared by the embedded outcome serializer (:func:`_diff_json`) and the standalone
+    diff-subcommand serializer (:func:`render_diff_json`) so their shapes never drift.
+    """
     return {
         "is_empty": bdiff.is_empty,
         "first_divergence": bdiff.first_divergence,
@@ -116,6 +125,48 @@ def _diff_json(bdiff: BehavioralDiff | None) -> dict[str, Any] | None:
             if not sd.same
         ],
     }
+
+
+def _diff_json(bdiff: BehavioralDiff | None) -> dict[str, Any] | None:
+    """Serialize a behavioral diff for embedding in the outcome-level JSON, or ``None``."""
+    if bdiff is None:
+        return None
+    return _diff_dict(bdiff)
+
+
+def render_diff_json(bdiff: BehavioralDiff) -> str:
+    """Render a standalone behavioral diff as a stable, sorted JSON document.
+
+    Consumed by the CLI's ``diff --json``. The schema matches the ``behavioral_diff``
+    object embedded in :func:`render_json` (both go through :func:`_diff_dict`), so a
+    standalone diff and a bisection's embedded diff are byte-for-byte the same shape.
+    """
+    return json.dumps(_diff_dict(bdiff), indent=2, sort_keys=True)
+
+
+def render_diff_markdown(bdiff: BehavioralDiff) -> str:
+    """Render a standalone behavioral diff (left vs right) as deterministic Markdown.
+
+    Consumed by the CLI's ``diff --markdown``. Carries exactly the facts the human
+    default of the ``diff`` command prints -- the empty-diff notice, the first-divergence
+    index, each differing step, and any final-output change -- so the two never drift.
+    """
+    out: list[str] = ["# behavioral diff", ""]
+    if bdiff.is_empty:
+        out.append("- no behavioral difference")
+        return "\n".join(out) + "\n"
+    if bdiff.first_divergence is not None:
+        out.append(f"- First divergence at step: {bdiff.first_divergence}")
+    if bdiff.final_output_changed:
+        out.append(f"- Final output (left): {bdiff.left_final!r}")
+        out.append(f"- Final output (right): {bdiff.right_final!r}")
+    differing = [sd for sd in bdiff.steps if not sd.same]
+    if differing:
+        out.append("")
+        out.append("## Differing steps")
+        for sd in differing:
+            out.append(f"- step {sd.index}: {sd.left}  =>  {sd.right}")
+    return "\n".join(out) + "\n"
 
 
 def _repro_json(repro: Trace | None) -> dict[str, Any] | None:
