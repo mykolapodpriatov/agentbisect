@@ -28,7 +28,7 @@ from .config import ConfigError, load_project_config
 from .diff import diff as diff_traces
 from .driver import run_bisection
 from .mock_tools import DivergencePolicy
-from .report import render_json, render_markdown, render_rich
+from .report import render_html, render_json, render_markdown, render_rich
 
 app = typer.Typer(
     add_completion=False,
@@ -130,10 +130,13 @@ def bisect(
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit machine-readable JSON (pipe-safe).")
     ] = False,
+    html_output: Annotated[
+        bool, typer.Option("--html", help="Emit a self-contained static HTML report.")
+    ] = False,
 ) -> None:
     """Bisect an axis over a captured bundle and report the first bad change."""
-    if markdown and json_output:
-        _fail("--markdown and --json are mutually exclusive", EXIT_USAGE)
+    if sum((markdown, json_output, html_output)) > 1:
+        _fail("--markdown, --json, and --html are mutually exclusive", EXIT_USAGE)
 
     try:
         run_bundle = load_bundle(bundle)
@@ -153,6 +156,9 @@ def bisect(
     if json_output:
         # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
         print(render_json(outcome))
+    elif html_output:
+        # Bypass Rich so angle brackets/markup are emitted verbatim and lines are not wrapped.
+        print(render_html(outcome))
     elif markdown:
         console.print(render_markdown(outcome))
     else:
@@ -241,10 +247,13 @@ def report(
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit machine-readable JSON (pipe-safe).")
     ] = False,
+    html_output: Annotated[
+        bool, typer.Option("--html", help="Emit a self-contained static HTML report.")
+    ] = False,
 ) -> None:
-    """Run a bisection and emit a culprit report (Markdown by default, or ``--json``)."""
-    if markdown and json_output:
-        _fail("--markdown and --json are mutually exclusive", EXIT_USAGE)
+    """Run a bisection and emit a culprit report (Markdown by default, or ``--json``/``--html``)."""
+    if sum((markdown, json_output, html_output)) > 1:
+        _fail("--markdown, --json, and --html are mutually exclusive", EXIT_USAGE)
 
     try:
         run_bundle = load_bundle(bundle)
@@ -261,6 +270,9 @@ def report(
     if json_output:
         # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
         print(render_json(outcome))
+    elif html_output:
+        # Bypass Rich so angle brackets/markup are emitted verbatim and lines are not wrapped.
+        print(render_html(outcome))
     else:
         console.print(render_markdown(outcome))
 
