@@ -338,6 +338,136 @@ def test_bisect_retrieval_axis_runs(tmp_path: Path) -> None:
     assert res.exit_code == 3, res.output
 
 
+def test_bisect_params_axis_reports_first_bad(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    # A ParamsAxis over the FakeAgent's 'final' output: the first value keeps the refund
+    # clause (GOOD), the second drops it (BAD) -> a monotonic good->bad transition. The
+    # value strings themselves contain '=', exercising first-'=' key/value splitting.
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--markdown",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert "First bad change" in res.output
+    assert "final=refund=no" in res.output
+
+
+def test_bisect_json_carries_culprit_ref(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    # The JSON is pipe-safe (bracketed arrays are not swallowed by Rich markup).
+    data = json.loads(res.output)
+    assert data["axis"] == "params"
+    assert data["first_bad"] == "final=refund=no"
+    assert data["last_good"] == "final=refund=yes"
+
+
+def test_bisect_json_and_markdown_mutually_exclusive(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--json",
+            "--markdown",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
+def test_report_json_emits_json(tmp_path: Path, temp_git_repo) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    versions = [
+        "You are support. Always state the refund policy.",
+        "You are support. Be brief.",  # drops refund -> bad
+    ]
+    repo = temp_git_repo("system.txt", versions)
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "prompt",
+            "--over",
+            f"{repo}:system.txt",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["axis"] == "prompt"
+    assert data["first_bad"] is not None
+
+
+def test_report_json_and_markdown_mutually_exclusive(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--json",
+            "--markdown",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
 def test_replay_command_override_variants(tmp_path: Path) -> None:
     cfg = _write_config(tmp_path)
     out = tmp_path / "bundle"

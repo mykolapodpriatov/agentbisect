@@ -88,10 +88,19 @@ agentbisect bisect --bundle bundle/ --config examples/project.py \
 agentbisect bisect --bundle bundle/ --config examples/project.py \
     --axis model --over gpt-4o-mini,gpt-4o,gpt-4.1
 
+# Bisect over a sampling param, and pipe machine-readable JSON to jq for the culprit.
+agentbisect bisect --bundle bundle/ --config examples/project.py \
+    --axis params --over 'max_tokens=256,512,1024' --json | jq -r .first_bad
+
 # Replay a single override, or diff two captured bundles.
 agentbisect replay --bundle bundle/ --config examples/project.py --override model=gpt-4o
 agentbisect diff bundleA/ bundleB/
 ```
+
+Both `bisect` and `report` accept `--json` for a stable, pipe-safe report (mutually
+exclusive with `--markdown`); the JSON carries exactly the facts the Markdown report does
+(axis, probes, first-bad/last-good, ambiguous range, per-step verdicts, behavioral diff,
+minimal repro).
 
 ### Library
 
@@ -117,6 +126,10 @@ the captured config (single-axis isolation):
 - `PromptGitAxis(repo_path, file_path, rev)` — order = git history (old→new) of a prompt file.
 - `ToolSchemaAxis(versions)` — ordered tool-schema sets.
 - `RetrievalAxis(snapshots)` — ordered retrieval snapshot refs.
+- `ParamsAxis(key, values)` — ordered values for one sampling/params key (e.g.
+  `max_tokens`, `top_p`, `reasoning_effort`), overriding `params[key]` only. `temperature`
+  is rejected: replay forces it to `0`, so bisecting it would be a silent no-op. CLI:
+  `--axis params --over 'max_tokens=256,512,1024'`.
 
 ## Judges
 

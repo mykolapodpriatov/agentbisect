@@ -11,6 +11,8 @@ Providers:
   candidate overrides ``system_prompt`` with that revision's file contents.
 * :class:`ToolSchemaAxis` -- ordered tool-schema sets; overrides ``tool_schemas``.
 * :class:`RetrievalAxis` -- ordered retrieval snapshot refs; overrides ``retrieval_ref``.
+* :class:`ParamsAxis` -- ordered values for one sampling/params key; overrides
+  ``params[key]`` only.
 """
 
 from __future__ import annotations
@@ -24,10 +26,16 @@ from .types import AgentConfig, Candidate, ToolSchema
 __all__ = [
     "Axis",
     "ModelListAxis",
+    "ParamsAxis",
     "PromptGitAxis",
     "RetrievalAxis",
     "ToolSchemaAxis",
 ]
+
+#: Params keys that :func:`agentbisect.replay.forced_determinism_params` overrides
+#: unconditionally during replay, so a :class:`ParamsAxis` over them would be a silent
+#: no-op (every candidate replays identically). Bisecting them is rejected.
+_REPLAY_FORCED_PARAMS = frozenset({"temperature"})
 
 
 @runtime_checkable
@@ -161,3 +169,44 @@ class RetrievalAxis:
             )
             for i, snapshot in enumerate(self._snapshots)
         ]
+
+
+class ParamsAxis:
+    """Candidates are ordered values for one sampling key, overriding ``params[key]``.
+
+    Each candidate overrides *only* ``params[key]`` and holds every other params entry
+    (and all other config fields) at the captured value, so a found culprit is
+    attributable to that single key (single-axis isolation). ``ref`` is ``"{key}={value}"``.
+
+    A key that :func:`agentbisect.replay.forced_determinism_params` overrides during
+    replay (e.g. ``temperature``) is rejected: replay forces it to a fixed value for
+    every candidate, so bisecting it would be a silent no-op.
+    """
+
+    name = "params"
+
+    def __init__(self, key: str, values: Sequence[Any]) -> None:
+        if key in _REPLAY_FORCED_PARAMS:
+            raise ValueError(
+                f"ParamsAxis cannot bisect {key!r}: replay forces it to a fixed value "
+                "for a reproducible replay, so every candidate would replay identically "
+                "(a silent no-op); choose a params key that is not forced for replay"
+            )
+        if not values:
+            raise ValueError("ParamsAxis requires at least one value")
+        self._key = key
+        self._values = list(values)
+
+    def candidates(self, base: AgentConfig) -> list[Candidate]:
+        result: list[Candidate] = []
+        for i, value in enumerate(self._values):
+            params = {**base.params, self._key: value}
+            result.append(
+                Candidate(
+                    axis=self.name,
+                    ref=f"{self._key}={value}",
+                    config=base.with_overrides(params=params),
+                    order=i,
+                )
+            )
+        return result

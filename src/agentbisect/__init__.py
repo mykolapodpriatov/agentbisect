@@ -10,7 +10,7 @@ behavioral diff.
 
 from __future__ import annotations
 
-from .axes import ModelListAxis, PromptGitAxis, RetrievalAxis, ToolSchemaAxis
+from .axes import ModelListAxis, ParamsAxis, PromptGitAxis, RetrievalAxis, ToolSchemaAxis
 from .bisect import (
     BisectError,
     NonMonotonicError,
@@ -91,6 +91,7 @@ __all__ = [
     "PromptGitAxis",
     "ToolSchemaAxis",
     "RetrievalAxis",
+    "ParamsAxis",
     # diff / minimize
     "diff",
     "BehavioralDiff",

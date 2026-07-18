@@ -9,6 +9,7 @@ import pytest
 
 from agentbisect.axes import (
     ModelListAxis,
+    ParamsAxis,
     PromptGitAxis,
     RetrievalAxis,
     ToolSchemaAxis,
@@ -120,6 +121,50 @@ def test_tool_schema_axis_empty_version_ref() -> None:
 def test_retrieval_axis_rejects_empty() -> None:
     with pytest.raises(ValueError):
         RetrievalAxis([])
+
+
+def test_params_axis_order_and_isolation() -> None:
+    axis = ParamsAxis("max_tokens", [256, 512, 1024])
+    cands = axis.candidates(_base())
+    # Candidates follow list order and expose the single key on each ref.
+    assert [c.order for c in cands] == [0, 1, 2]
+    assert [c.ref for c in cands] == [
+        "max_tokens=256",
+        "max_tokens=512",
+        "max_tokens=1024",
+    ]
+    assert [c.config.params["max_tokens"] for c in cands] == [256, 512, 1024]
+    # Only params[max_tokens] varies; every other config field is held at base.
+    for c in cands:
+        assert c.axis == "params"
+        assert c.config.system_prompt == "ORIGINAL PROMPT"
+        assert c.config.model == "base-model"
+        assert c.config.retrieval_ref == "base-snap"
+
+
+def test_params_axis_preserves_base_params() -> None:
+    # The base carries other params keys; overriding one must hold the rest.
+    base = _base().with_overrides(params={"temperature": 0, "top_p": 0.9, "seed": 7})
+    cands = ParamsAxis("top_p", [0.5, 0.8]).candidates(base)
+    for c in cands:
+        # Untouched base entries survive on every candidate.
+        assert c.config.params["temperature"] == 0
+        assert c.config.params["seed"] == 7
+    assert [c.config.params["top_p"] for c in cands] == [0.5, 0.8]
+    # The base config itself is never mutated (single-axis isolation).
+    assert base.params["top_p"] == 0.9
+
+
+def test_params_axis_rejects_empty() -> None:
+    with pytest.raises(ValueError, match="at least one value"):
+        ParamsAxis("max_tokens", [])
+
+
+def test_params_axis_rejects_temperature() -> None:
+    # replay.forced_determinism_params() forces temperature=0 for every candidate, so a
+    # ParamsAxis over it would be a silent no-op; the constructor must reject it by name.
+    with pytest.raises(ValueError, match="temperature"):
+        ParamsAxis("temperature", [0.0, 0.7, 1.0])
 
 
 def test_prompt_git_axis_skips_commit_where_file_absent(tmp_path: Path) -> None:

@@ -20,7 +20,7 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
-from .axes import Axis, ModelListAxis, PromptGitAxis, RetrievalAxis
+from .axes import Axis, ModelListAxis, ParamsAxis, PromptGitAxis, RetrievalAxis
 from .bisect import NonMonotonicError, UntestableEndpointError
 from .bundle import BundleError, load_bundle, save_bundle
 from .capture import capture
@@ -28,7 +28,7 @@ from .config import ConfigError, load_project_config
 from .diff import diff as diff_traces
 from .driver import run_bisection
 from .mock_tools import DivergencePolicy
-from .report import render_markdown, render_rich
+from .report import render_json, render_markdown, render_rich
 
 app = typer.Typer(
     add_completion=False,
@@ -69,6 +69,22 @@ def capture_cmd(
     console.print(f"[green]captured[/] {len(bundle.trace.steps)} step(s) -> {out}")
 
 
+def _coerce_param_value(text: str) -> int | float | str:
+    """Coerce a CLI params value to ``int``/``float`` where possible, else keep the string.
+
+    So ``max_tokens=256`` yields the int ``256``, ``top_p=0.9`` the float ``0.9``, and
+    ``reasoning_effort=high`` the string ``"high"``.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
 def _build_axis(axis: str, over: str, bundle_dir: Path) -> Axis:
     """Construct an axis provider from the ``--axis`` / ``--over`` CLI options."""
     if axis == "model":
@@ -82,26 +98,43 @@ def _build_axis(axis: str, over: str, bundle_dir: Path) -> Axis:
     if axis == "retrieval":
         snaps = [s.strip() for s in over.split(",") if s.strip()]
         return RetrievalAxis(snaps)
+    if axis == "params":
+        # over = "<key>=<v1>,<v2>,..."
+        key, sep, raw = over.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise ConfigError(
+                "the 'params' axis spec must be '<key>=<v1>,<v2>,...' "
+                "(e.g. max_tokens=256,512,1024)"
+            )
+        values = [_coerce_param_value(v.strip()) for v in raw.split(",") if v.strip()]
+        return ParamsAxis(key, values)
     if axis == "tools":
         raise ConfigError(
             "the 'tools' axis requires schema objects; drive it via the library "
             "(ToolSchemaAxis) rather than the CLI string form"
         )
-    raise ConfigError(f"unknown axis {axis!r}; expected model|prompt|tools|retrieval")
+    raise ConfigError(f"unknown axis {axis!r}; expected model|prompt|tools|retrieval|params")
 
 
 @app.command()
 def bisect(
     bundle: Annotated[Path, typer.Option("--bundle", help="Bundle directory.")],
     config: Annotated[Path, typer.Option("--config", help="Project config .py (for the oracle).")],
-    axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval.")],
+    axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval|params.")],
     over: Annotated[str, typer.Option("--over", help="Axis spec (see docs).")],
     policy: Annotated[
         DivergencePolicy, typer.Option("--policy", help="Divergence policy.")
     ] = DivergencePolicy.SKIP,
     markdown: Annotated[bool, typer.Option("--markdown", help="Emit Markdown instead.")] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON (pipe-safe).")
+    ] = False,
 ) -> None:
     """Bisect an axis over a captured bundle and report the first bad change."""
+    if markdown and json_output:
+        _fail("--markdown and --json are mutually exclusive", EXIT_USAGE)
+
     try:
         run_bundle = load_bundle(bundle)
         project = load_project_config(config)
@@ -117,7 +150,10 @@ def bisect(
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
 
-    if markdown:
+    if json_output:
+        # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
+        print(render_json(outcome))
+    elif markdown:
         console.print(render_markdown(outcome))
     else:
         render_rich(outcome, console)
@@ -199,10 +235,17 @@ def diff(
 def report(
     bundle: Annotated[Path, typer.Option("--bundle", help="Bundle directory.")],
     config: Annotated[Path, typer.Option("--config", help="Project config .py.")],
-    axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval.")],
+    axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval|params.")],
     over: Annotated[str, typer.Option("--over", help="Axis spec (see docs).")],
+    markdown: Annotated[bool, typer.Option("--markdown", help="Emit Markdown (default).")] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit machine-readable JSON (pipe-safe).")
+    ] = False,
 ) -> None:
-    """Run a bisection and emit a Markdown culprit report."""
+    """Run a bisection and emit a culprit report (Markdown by default, or ``--json``)."""
+    if markdown and json_output:
+        _fail("--markdown and --json are mutually exclusive", EXIT_USAGE)
+
     try:
         run_bundle = load_bundle(bundle)
         project = load_project_config(config)
@@ -215,7 +258,11 @@ def report(
         outcome = run_bisection(runner, run_bundle, candidates, oracle)
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
-    console.print(render_markdown(outcome))
+    if json_output:
+        # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
+        print(render_json(outcome))
+    else:
+        console.print(render_markdown(outcome))
 
 
 if __name__ == "__main__":  # pragma: no cover
