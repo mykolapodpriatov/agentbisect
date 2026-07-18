@@ -366,13 +366,142 @@ def test_bisect_unknown_axis_usage_error(tmp_path: Path) -> None:
     assert res.exit_code == 4, res.output
 
 
-def test_bisect_tools_axis_cli_unsupported(tmp_path: Path) -> None:
+def _write_schema_file(path: Path, name: str, version: str) -> Path:
+    """Write a tiny, offline tool-schema JSON file (a one-tool version) and return it."""
+    path.write_text(
+        json.dumps([{"name": name, "schema": {"type": "object"}, "version": version}]),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_build_axis_tools_loads_schema_files(tmp_path: Path) -> None:
+    from agentbisect.axes import ToolSchemaAxis
+    from agentbisect.cli import _build_axis
+    from agentbisect.types import AgentConfig
+
+    f1 = _write_schema_file(tmp_path / "v1.json", "search", "1")
+    f2 = _write_schema_file(tmp_path / "v2.json", "search", "2")
+    axis = _build_axis("tools", f"{f1},{f2}", tmp_path)
+    assert isinstance(axis, ToolSchemaAxis)
+
+    base = AgentConfig(system_prompt="P", model="m", retrieval_ref="snap")
+    cands = axis.candidates(base)
+    # Ordered old -> new by file order, overriding ONLY tool_schemas (single-axis isolation).
+    assert [c.order for c in cands] == [0, 1]
+    assert cands[0].config.tool_schemas[0].name == "search"
+    assert cands[0].config.tool_schemas[0].version == "1"
+    assert cands[1].config.tool_schemas[0].version == "2"
+    for c in cands:
+        assert c.axis == "tools"
+        assert c.config.system_prompt == "P"
+        assert c.config.model == "m"
+        assert c.config.retrieval_ref == "snap"
+
+
+def test_bisect_tools_axis_from_files_runs(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    f1 = _write_schema_file(tmp_path / "v1.json", "search", "1")
+    f2 = _write_schema_file(tmp_path / "v2.json", "search", "2")
+    # tool_schemas do not alter the FakeAgent output, so both endpoints replay GOOD ->
+    # non-monotonic (exit 3). This exercises the tools-axis CLI construction path.
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "tools",
+            "--over",
+            f"{f1},{f2}",
+        ],
+    )
+    assert res.exit_code == 3, res.output
+
+
+def test_bisect_tools_axis_missing_file_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    # The tools axis is now CLI-reachable via schema files; a nonexistent file is a clean
+    # usage error (exit 4), never a crash.
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "tools",
+            "--over",
+            str(tmp_path / "nope.json"),
+        ],
+    )
+    assert res.exit_code == 4, res.output
+    assert "error" in res.output.lower()
+
+
+def test_bisect_tools_axis_invalid_json_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "tools",
+            "--over",
+            str(bad),
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
+def test_bisect_tools_axis_malformed_schema_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    # Valid JSON, but not an array of ToolSchema objects (the required 'name' is missing).
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([{"schema": {}}]), encoding="utf-8")
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "tools",
+            "--over",
+            str(bad),
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
+def test_bisect_tools_axis_empty_spec_usage_error(tmp_path: Path) -> None:
     cfg = _write_config(tmp_path)
     out = tmp_path / "bundle"
     runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
     res = runner.invoke(
         app,
-        ["bisect", "--bundle", str(out), "--config", str(cfg), "--axis", "tools", "--over", "x"],
+        ["bisect", "--bundle", str(out), "--config", str(cfg), "--axis", "tools", "--over", " , "],
     )
     assert res.exit_code == 4, res.output
 
