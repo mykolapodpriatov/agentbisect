@@ -128,11 +128,16 @@ def run_bisection(
     oracle: Oracle,
     *,
     policy: DivergencePolicy = DivergencePolicy.SKIP,
+    passthrough_executor: Callable[[str, dict[str, Any]], Any] | None = None,
 ) -> BisectionOutcome:
     """Run a full bisection over ``candidates`` and assemble report artifacts.
 
     When a single first-bad change is isolated, computes the behavioral diff between the
     last-good and first-bad replays and a minimal reproducing trace of the first-bad run.
+
+    ``passthrough_executor`` is required only when ``policy`` is ``PASSTHROUGH``; it is
+    forwarded to :func:`make_verdict_fn` so unmatched tool calls during the search are
+    re-executed live instead of degrading to a quarantined ``skip``.
     """
     passthrough_seen = {"value": False}
 
@@ -144,6 +149,7 @@ def run_bisection(
         bundle,
         oracle,
         policy=policy,
+        passthrough_executor=passthrough_executor,
         on_passthrough=_note_passthrough,
     )
     result = bisect(candidates, verdict_fn)

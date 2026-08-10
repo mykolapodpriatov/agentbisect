@@ -112,9 +112,9 @@ candidates = ModelListAxis(["model-a", "model-b", "model-c"]).candidates(bundle.
 oracle = AssertionOracle(lambda trace, b: "refund policy" in trace.final_output)
 
 outcome = run_bisection(runner, bundle, candidates, oracle)
-print(outcome.result.first_bad)        # the culprit (or None if ambiguous)
-print(outcome.behavioral_diff)         # last-good vs first-bad
-print(outcome.minimal_repro)           # minimal reproducing trace
+print(outcome.result.first_bad)  # the culprit (or None if ambiguous)
+print(outcome.behavioral_diff)  # last-good vs first-bad
+print(outcome.minimal_repro)  # minimal reproducing trace
 ```
 
 ## Axes
