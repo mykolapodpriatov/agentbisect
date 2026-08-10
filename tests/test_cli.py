@@ -861,3 +861,233 @@ def test_report_command_nonmonotonic_bisect_error(tmp_path: Path) -> None:
         ],
     )
     assert res.exit_code == 3, res.output
+
+
+# ---------------------------------------------- --policy passthrough CLI wiring (issue #9)
+
+
+def _write_diverging_config(tmp_path: Path, marker: Path) -> Path:
+    """Write a project config whose runner's tool-call args depend on ``config.model``.
+
+    ``model == "m0"`` calls tool ``search`` with ``{"q": "orig"}`` (what capture records);
+    any other model calls it with ``{"q": "different"}``, which has no in-order recorded
+    match -- so replaying a non-"m0" candidate always diverges, exercising whichever
+    ``--policy`` the CLI selects. ``tool_executor()`` appends a line to ``marker`` on every
+    invocation (both during capture and, if selected, ``passthrough``), so a test can
+    prove the live executor was actually called rather than just accepting the CLI flag.
+    """
+    cfg = tmp_path / "diverging_project.py"
+    cfg.write_text(
+        f"""
+from agentbisect.oracle import AssertionOracle
+from agentbisect.types import AgentConfig, ToolStep, Trace
+
+
+class DivergingRunner:
+    def run(self, config, tools):
+        q = "orig" if config.model == "m0" else "different"
+        output = tools.call("search", {{"q": q}})
+        step = ToolStep(
+            index=0, tool="search", args={{"q": q}}, output=output, ok=True, occurrence=0
+        )
+        return Trace(steps=(step,), final_output=str(output))
+
+
+def runner():
+    return DivergingRunner()
+
+
+def config():
+    return AgentConfig(system_prompt="p", model="m0")
+
+
+def oracle():
+    # BAD iff the tool call diverged from the recording (i.e. args were "different").
+    return AssertionOracle(lambda t, b: t.final_output == "OUT:orig")
+
+
+def tool_executor():
+    marker = {str(marker)!r}
+
+    def run(tool, args):
+        with open(marker, "a", encoding="utf-8") as f:
+            f.write("CALLED\\n")
+        return f"OUT:{{args['q']}}"
+
+    return run
+""",
+        encoding="utf-8",
+    )
+    return cfg
+
+
+def test_bisect_passthrough_reexecutes_live_and_finds_first_bad(tmp_path: Path) -> None:
+    marker = tmp_path / "invoked.txt"
+    cfg = _write_diverging_config(tmp_path, marker)
+    out = tmp_path / "bundle"
+    cap = runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    assert cap.exit_code == 0, cap.output
+    assert marker.exists()  # capture already invoked tool_executor() once.
+    marker.unlink()  # isolate the signal to the bisect run below.
+
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--policy",
+            "passthrough",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["first_bad"] == "m1"
+    assert data["last_good"] == "m0"
+    # The live tool_executor() was actually invoked to resolve the diverging m1 candidate
+    # (proving the CLI wired project.tool_executor() through to run_bisection(), not just
+    # accepted --policy passthrough as a no-op).
+    assert marker.exists()
+    assert "CALLED" in marker.read_text(encoding="utf-8")
+
+
+def test_replay_passthrough_reexecutes_live_tool(tmp_path: Path) -> None:
+    marker = tmp_path / "invoked.txt"
+    cfg = _write_diverging_config(tmp_path, marker)
+    out = tmp_path / "bundle"
+    cap = runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    assert cap.exit_code == 0, cap.output
+    marker.unlink()
+
+    res = runner.invoke(
+        app,
+        [
+            "replay",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--override",
+            "model=m1",
+            "--policy",
+            "passthrough",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert "passthrough=True" in res.output
+    assert "diverged=False" in res.output
+    assert marker.exists()
+    assert "CALLED" in marker.read_text(encoding="utf-8")
+
+
+def test_report_passthrough_reexecutes_live_and_reports_first_bad(tmp_path: Path) -> None:
+    marker = tmp_path / "invoked.txt"
+    cfg = _write_diverging_config(tmp_path, marker)
+    out = tmp_path / "bundle"
+    cap = runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    assert cap.exit_code == 0, cap.output
+    marker.unlink()
+
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--policy",
+            "passthrough",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert "First bad change" in res.output
+    assert marker.exists()
+    assert "CALLED" in marker.read_text(encoding="utf-8")
+
+
+def test_passthrough_without_tool_executor_hook_fails_fast(tmp_path: Path) -> None:
+    # A project config that defines runner()/oracle() but NOT tool_executor(): choosing
+    # --policy passthrough must fail fast with a clear usage error instead of silently
+    # degrading to skip mid-run.
+    cfg = tmp_path / "no_executor_project.py"
+    cfg.write_text(
+        """
+from agentbisect.agent.fake import FakeAgent
+from agentbisect.oracle import AssertionOracle
+from agentbisect.types import AgentConfig
+
+
+def runner():
+    return FakeAgent()
+
+
+def config():
+    return AgentConfig(
+        system_prompt="p",
+        model="m0",
+        params={"program": [{"tool": "search", "args": {"q": "x"}}], "final": "OUT"},
+    )
+
+
+def tool_executor():
+    def run(tool, args):
+        return f"{tool}-result"
+    return run
+
+
+def oracle():
+    return AssertionOracle(lambda t, b: True)
+""",
+        encoding="utf-8",
+    )
+    out = tmp_path / "bundle"
+    cap = runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    assert cap.exit_code == 0, cap.output
+
+    # A second config, structurally identical except it has no tool_executor() hook, used
+    # for the replay/bisect/report commands (capture needs the hook to build the bundle).
+    no_exec_cfg = tmp_path / "bisect_only_project.py"
+    no_exec_cfg.write_text(
+        """
+from agentbisect.agent.fake import FakeAgent
+from agentbisect.oracle import AssertionOracle
+
+
+def runner():
+    return FakeAgent()
+
+
+def oracle():
+    return AssertionOracle(lambda t, b: True)
+""",
+        encoding="utf-8",
+    )
+
+    res = runner.invoke(
+        app,
+        [
+            "replay",
+            "--bundle",
+            str(out),
+            "--config",
+            str(no_exec_cfg),
+            "--override",
+            "model=m1",
+            "--policy",
+            "passthrough",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+    assert "tool_executor" in res.output

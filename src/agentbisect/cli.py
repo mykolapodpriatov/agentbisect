@@ -190,11 +190,24 @@ def bisect(
         oracle = project.oracle()
         axis_provider = _build_axis(axis, over, bundle)
         candidates = axis_provider.candidates(run_bundle.config)
+        # Only require the tool_executor() hook when passthrough is actually selected --
+        # skip/nearest never touch it. A missing hook fails fast here (ConfigError) rather
+        # than degrading mid-run to a silent skip.
+        passthrough_executor = (
+            project.tool_executor() if policy is DivergencePolicy.PASSTHROUGH else None
+        )
     except (BundleError, ConfigError, ValueError) as exc:
         _fail(str(exc), EXIT_USAGE)
 
     try:
-        outcome = run_bisection(runner, run_bundle, candidates, oracle, policy=policy)
+        outcome = run_bisection(
+            runner,
+            run_bundle,
+            candidates,
+            oracle,
+            policy=policy,
+            passthrough_executor=passthrough_executor,
+        )
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
 
@@ -231,6 +244,12 @@ def replay(
         run_bundle = load_bundle(bundle)
         project = load_project_config(config)
         runner = project.runner()
+        # Only require the tool_executor() hook when passthrough is actually selected --
+        # skip/nearest never touch it. A missing hook fails fast here (ConfigError) rather
+        # than degrading mid-run to a silent skip.
+        passthrough_executor = (
+            project.tool_executor() if policy is DivergencePolicy.PASSTHROUGH else None
+        )
     except (BundleError, ConfigError) as exc:
         _fail(str(exc), EXIT_USAGE)
 
@@ -248,7 +267,13 @@ def replay(
             _fail(f"unsupported override {key!r}", EXIT_USAGE)
 
     candidate_config = run_bundle.config.with_overrides(**changes)
-    result = do_replay(runner, candidate_config, run_bundle.trace, policy=policy)
+    result = do_replay(
+        runner,
+        candidate_config,
+        run_bundle.trace,
+        policy=policy,
+        passthrough_executor=passthrough_executor,
+    )
     console.print(
         f"diverged={result.diverged} "
         f"nearest={result.has_nearest_substitutions} "
@@ -304,6 +329,9 @@ def report(
     config: Annotated[Path, typer.Option("--config", help="Project config .py.")],
     axis: Annotated[str, typer.Option("--axis", help="Axis: model|prompt|tools|retrieval|params.")],
     over: Annotated[str, typer.Option("--over", help="Axis spec (see docs).")],
+    policy: Annotated[
+        DivergencePolicy, typer.Option("--policy", help="Divergence policy.")
+    ] = DivergencePolicy.SKIP,
     markdown: Annotated[bool, typer.Option("--markdown", help="Emit Markdown (default).")] = False,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit machine-readable JSON (pipe-safe).")
@@ -322,10 +350,23 @@ def report(
         runner = project.runner()
         oracle = project.oracle()
         candidates = _build_axis(axis, over, bundle).candidates(run_bundle.config)
+        # Only require the tool_executor() hook when passthrough is actually selected --
+        # skip/nearest never touch it. A missing hook fails fast here (ConfigError) rather
+        # than degrading mid-run to a silent skip.
+        passthrough_executor = (
+            project.tool_executor() if policy is DivergencePolicy.PASSTHROUGH else None
+        )
     except (BundleError, ConfigError, ValueError) as exc:
         _fail(str(exc), EXIT_USAGE)
     try:
-        outcome = run_bisection(runner, run_bundle, candidates, oracle)
+        outcome = run_bisection(
+            runner,
+            run_bundle,
+            candidates,
+            oracle,
+            policy=policy,
+            passthrough_executor=passthrough_executor,
+        )
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
     if json_output:
