@@ -295,3 +295,41 @@ def test_steps_tested_recorded() -> None:
     # Each recorded entry pairs a candidate with the verdict it returned.
     for cand, verdict in result.steps_tested:
         assert verdict is verdicts[cand.order]
+
+
+# --------------------------------------------------------------------- max_probes
+
+
+def test_max_probes_stops_after_cap_and_is_ambiguous() -> None:
+    """A 7-candidate axis with max_probes=3 stops after 3 verdicts; first_bad is None."""
+    calls = {"n": 0}
+    # Boundary at index 4 (v4): plenty of remaining range after 3 probes.
+    verdicts = [G, G, G, G, B, B, B]
+
+    def fn(candidate: Candidate) -> Verdict:
+        calls["n"] += 1
+        return verdicts[candidate.order]
+
+    result = bisect(_candidates(7), fn, max_probes=3)
+    assert calls["n"] == 3
+    assert result.probes == 3
+    assert result.first_bad is None
+    assert result.is_ambiguous
+    assert result.ambiguous_range is not None
+    assert result.stop_reason is not None
+    assert "max-probes=3" in result.stop_reason
+
+
+def test_max_probes_under_cap_is_unchanged() -> None:
+    """A tiny axis that finishes under the cap still isolates first_bad."""
+    verdicts = [G, B]
+    result = bisect(_candidates(2), _from_list(verdicts), max_probes=10)
+    assert result.first_bad is not None
+    assert result.first_bad.order == 1
+    assert result.stop_reason is None
+    assert result.probes == 2
+
+
+def test_max_probes_less_than_two_is_value_error() -> None:
+    with pytest.raises(ValueError, match="at least 2"):
+        bisect(_candidates(7), _from_list([G] * 7), max_probes=1)

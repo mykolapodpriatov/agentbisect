@@ -181,10 +181,19 @@ def bisect(
     html_output: Annotated[
         bool, typer.Option("--html", help="Emit a self-contained static HTML report.")
     ] = False,
+    max_probes: Annotated[
+        int | None,
+        typer.Option(
+            "--max-probes",
+            help="Hard cap on verdict probes, including both endpoints. Omit for no cap.",
+        ),
+    ] = None,
 ) -> None:
     """Bisect an axis over a captured bundle and report the first bad change."""
     if sum((markdown, json_output, html_output)) > 1:
         _fail("--markdown, --json, and --html are mutually exclusive", EXIT_USAGE)
+    if max_probes is not None and max_probes < 2:
+        _fail("--max-probes must be at least 2 (both endpoints must be probed)", EXIT_USAGE)
 
     try:
         run_bundle = load_bundle(bundle)
@@ -210,6 +219,7 @@ def bisect(
             oracle,
             policy=policy,
             passthrough_executor=passthrough_executor,
+            max_probes=max_probes,
         )
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)

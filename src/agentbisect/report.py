@@ -94,10 +94,13 @@ def render_markdown(outcome: BisectionOutcome) -> str:
         if result.ambiguous_range is not None:
             lo, hi = result.ambiguous_range
             out.append(f"- The breaking change lies between `{lo.ref}` and `{hi.ref}`.")
-        out.append(
-            "- This happens when candidates at the boundary were untestable (skipped); "
-            "narrow the range or resolve the skips to isolate a single culprit."
-        )
+        if result.stop_reason is not None:
+            out.append(f"- {result.stop_reason}")
+        else:
+            out.append(
+                "- This happens when candidates at the boundary were untestable (skipped); "
+                "narrow the range or resolve the skips to isolate a single culprit."
+            )
         out.append("")
 
     out.append("## Candidates tested")
@@ -202,6 +205,7 @@ def render_json(outcome: BisectionOutcome) -> str:
             if result.ambiguous_range is not None
             else None
         ),
+        "stop_reason": result.stop_reason,
         "steps_tested": [
             {"order": cand.order, "ref": cand.ref, "verdict": verdict.value}
             for cand, verdict in result.steps_tested
@@ -335,10 +339,13 @@ def render_html(outcome: BisectionOutcome) -> str:
                 f"<code>{html.escape(lo.ref)}</code> and "
                 f"<code>{html.escape(hi.ref)}</code>.</p>"
             )
-        body.append(
-            "<p>This happens when candidates at the boundary were untestable (skipped); "
-            "narrow the range or resolve the skips to isolate a single culprit.</p>"
-        )
+        if result.stop_reason is not None:
+            body.append(f"<p>{html.escape(result.stop_reason)}</p>")
+        else:
+            body.append(
+                "<p>This happens when candidates at the boundary were untestable (skipped); "
+                "narrow the range or resolve the skips to isolate a single culprit.</p>"
+            )
 
     body.append("<h2>Candidates tested</h2>")
     body.append("<table>")
@@ -372,6 +379,8 @@ def render_rich(outcome: BisectionOutcome, console: Console | None = None) -> No
             body = f"Axis: {result.axis}\nBetween {lo.ref} and {hi.ref}"
         else:  # pragma: no cover - defensive
             body = f"Axis: {result.axis}"
+        if result.stop_reason is not None:
+            body += f"\n{result.stop_reason}"
     console.print(Panel(body, title=title))
 
     table = Table("order", "ref", "verdict")

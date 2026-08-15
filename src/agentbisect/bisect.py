@@ -20,6 +20,7 @@ Guarantees:
 * **Flaky detection.** A candidate that flips verdict between probes raises
   :class:`NonMonotonicError` -- never a confidently-wrong ``first_bad``.
 * **Bounded probes.** Total probes are bounded; the function always terminates.
+  An optional ``max_probes`` cap aborts as an ambiguous range rather than guessing.
 """
 
 from __future__ import annotations
@@ -59,17 +60,24 @@ class NonMonotonicError(BisectError):
     """
 
 
+class _ProbeCapReached(Exception):
+    """Internal: ``max_probes`` budget exhausted before the next ``verdict_fn`` call."""
+
+
 class _Memo:
     """Caches verdicts and detects flakiness (a candidate flipping between probes)."""
 
-    def __init__(self, verdict_fn: VerdictFn) -> None:
+    def __init__(self, verdict_fn: VerdictFn, max_probes: int | None = None) -> None:
         self._fn = verdict_fn
+        self._max_probes = max_probes
         self._cache: dict[int, Verdict] = {}
         self.order: list[tuple[Candidate, Verdict]] = []
         self.probes = 0
 
     def get(self, candidates: Sequence[Candidate], idx: int) -> Verdict:
         """Return the verdict for ``candidates[idx]``, detecting flaky re-probes."""
+        if self._max_probes is not None and self.probes >= self._max_probes:
+            raise _ProbeCapReached
         candidate = candidates[idx]
         self.probes += 1
         fresh = self._fn(candidate)
@@ -84,7 +92,12 @@ class _Memo:
         return fresh
 
 
-def bisect(candidates: Sequence[Candidate], verdict_fn: VerdictFn) -> BisectResult:
+def bisect(
+    candidates: Sequence[Candidate],
+    verdict_fn: VerdictFn,
+    *,
+    max_probes: int | None = None,
+) -> BisectResult:
     """Binary-search ``candidates`` (ordered old->new) for the first bad change.
 
     Parameters
@@ -95,6 +108,10 @@ def bisect(candidates: Sequence[Candidate], verdict_fn: VerdictFn) -> BisectResu
     verdict_fn:
         Maps a candidate to ``good``/``bad``/``skip``. The quarantine rule (diverged or
         nearest-substituted replays -> ``skip``) is expected to be folded in here.
+    max_probes:
+        Optional hard cap on ``verdict_fn`` calls, including the two endpoint probes.
+        ``None`` means no cap. Hitting the cap returns the current bracket as an
+        ambiguous range (``first_bad=None``) rather than a guessed culprit.
 
     Returns
     -------
@@ -105,7 +122,7 @@ def bisect(candidates: Sequence[Candidate], verdict_fn: VerdictFn) -> BisectResu
     Raises
     ------
     ValueError
-        If fewer than two candidates are supplied.
+        If fewer than two candidates are supplied, or ``max_probes`` is set and ``< 2``.
     UntestableEndpointError
         If an endpoint resolves ``skip``.
     NonMonotonicError
@@ -114,8 +131,10 @@ def bisect(candidates: Sequence[Candidate], verdict_fn: VerdictFn) -> BisectResu
     n = len(candidates)
     if n < 2:
         raise ValueError("bisect requires at least two candidates")
+    if max_probes is not None and max_probes < 2:
+        raise ValueError("max_probes must be at least 2 (both endpoints must be probed)")
 
-    memo = _Memo(verdict_fn)
+    memo = _Memo(verdict_fn, max_probes=max_probes)
 
     # --- Endpoint validation (explicit first step) -------------------------------
     lo_verdict = memo.get(candidates, 0)
@@ -149,17 +168,29 @@ def bisect(candidates: Sequence[Candidate], verdict_fn: VerdictFn) -> BisectResu
     hi = n - 1  # lowest index confirmed bad
 
     # --- Binary search with skip-aware outward probing ---------------------------
-    while hi > lo + 1:
-        mid = (lo + hi) // 2
-        verdict, resolved = _probe_with_skip(candidates, memo, mid, lo, hi)
-        if verdict is None:
-            # The entire open interval (lo, hi) is skip -> ambiguous range.
-            break
-        assert resolved is not None
-        if verdict is Verdict.GOOD:
-            lo = resolved
-        else:  # Verdict.BAD
-            hi = resolved
+    try:
+        while hi > lo + 1:
+            mid = (lo + hi) // 2
+            verdict, resolved = _probe_with_skip(candidates, memo, mid, lo, hi)
+            if verdict is None:
+                # The entire open interval (lo, hi) is skip -> ambiguous range.
+                break
+            assert resolved is not None
+            if verdict is Verdict.GOOD:
+                lo = resolved
+            else:  # Verdict.BAD
+                hi = resolved
+    except _ProbeCapReached:
+        return _build_result(
+            candidates,
+            memo,
+            lo,
+            hi,
+            stop_reason=(
+                f"stopped after {memo.probes} probes (max-probes={max_probes}); "
+                "no single first-bad isolated"
+            ),
+        )
 
     return _build_result(candidates, memo, lo, hi)
 
@@ -205,11 +236,18 @@ def _build_result(
     memo: _Memo,
     lo: int,
     hi: int,
+    *,
+    stop_reason: str | None = None,
 ) -> BisectResult:
-    """Assemble the final result, emitting a single first_bad only when ``hi == lo+1``."""
+    """Assemble the final result, emitting a single first_bad only when ``hi == lo+1``.
+
+    A ``stop_reason`` (probe-cap) always yields ``first_bad=None`` even if the
+    remaining bracket happens to look adjacent -- the cap means we did not finish
+    confirming the boundary.
+    """
     axis = candidates[0].axis
     last_good = candidates[lo]
-    if hi == lo + 1:
+    if stop_reason is None and hi == lo + 1:
         return BisectResult(
             axis=axis,
             first_bad=candidates[hi],
@@ -218,7 +256,7 @@ def _build_result(
             steps_tested=tuple(memo.order),
             probes=memo.probes,
         )
-    # Undetermined boundary (skip at the edge / all-skip interval) -> ambiguous range.
+    # Undetermined boundary (skip at the edge / all-skip interval / probe cap).
     return BisectResult(
         axis=axis,
         first_bad=None,
@@ -226,4 +264,5 @@ def _build_result(
         ambiguous_range=(candidates[lo], candidates[hi]),
         steps_tested=tuple(memo.order),
         probes=memo.probes,
+        stop_reason=stop_reason,
     )
