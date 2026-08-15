@@ -31,6 +31,7 @@ from .minimize import minimize
 from .mock_tools import DivergencePolicy
 from .oracle import AssertionOracle, BackendError, FakeOracle, LLMJudge, Oracle
 from .replay import ReplayTemperatureWarning, replay
+from .timeout import CandidateTimeout
 from .types import (
     AgentConfig,
     BisectResult,
@@ -71,6 +72,7 @@ __all__ = [
     "capture",
     "replay",
     "ReplayTemperatureWarning",
+    "CandidateTimeout",
     "DivergencePolicy",
     # bisect
     "bisect",

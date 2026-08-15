@@ -11,6 +11,7 @@ from agentbisect.agent.fake import FakeAgent
 from agentbisect.bundle import make_bundle
 from agentbisect.mock_tools import DivergencePolicy
 from agentbisect.replay import ReplayTemperatureWarning, replay
+from agentbisect.timeout import expire_after
 from agentbisect.types import AgentConfig, ToolStep, Trace
 
 
@@ -29,6 +30,43 @@ def _capture(agent: FakeAgent, config: AgentConfig, executor: Any) -> Trace:
     from agentbisect.capture import capture
 
     return capture(agent, config, executor, label="t").trace
+
+
+def test_replay_timeout_overrun_is_timed_out_not_run(fake_agent: FakeAgent) -> None:
+    """A stub that expires instantly yields timed_out, without calling the runner."""
+
+    class BoomAgent:
+        def run(self, config: AgentConfig, tools: Any) -> Trace:
+            raise AssertionError("runner must not be called after the deadline")
+
+    config = AgentConfig(system_prompt="p", model="m")
+    recorded = Trace()
+    result = replay(
+        BoomAgent(),  # type: ignore[arg-type]
+        config,
+        recorded,
+        timeout=0.5,
+        timeout_impl=expire_after(10.0),
+    )
+    assert result.timed_out is True
+    assert result.diverged is False
+    assert "timed out" in " ".join(result.notes)
+
+
+def test_replay_timeout_zero_does_not_use_impl(fake_agent: FakeAgent) -> None:
+    config = AgentConfig(
+        system_prompt="p",
+        model="m",
+        params={"program": [{"tool": "search", "args": {"q": "a"}}], "final": "FINAL"},
+    )
+    recorded = _capture(fake_agent, config, _counting_executor())
+
+    def boom_impl(fn: Any, seconds: float) -> Any:
+        raise AssertionError("timeout=0 must not invoke the wait impl")
+
+    result = replay(fake_agent, config, recorded, timeout=0, timeout_impl=boom_impl)
+    assert result.timed_out is False
+    assert result.trace.final_output == "FINAL"
 
 
 def test_replay_reproduces_recorded_trace_when_unchanged(fake_agent: FakeAgent) -> None:

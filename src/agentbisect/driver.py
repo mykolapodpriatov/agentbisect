@@ -28,6 +28,7 @@ from .diff import BehavioralDiff, diff
 from .mock_tools import DivergencePolicy
 from .oracle import BackendError, Oracle
 from .replay import replay
+from .timeout import TimeoutImpl
 from .types import BisectResult, Candidate, ReplayResult, RunBundle, Trace, Verdict
 
 __all__ = [
@@ -56,13 +57,15 @@ def make_verdict_fn(
     policy: DivergencePolicy = DivergencePolicy.SKIP,
     passthrough_executor: Callable[[str, dict[str, Any]], Any] | None = None,
     on_passthrough: Callable[[Candidate, ReplayResult], None] | None = None,
+    timeout: float | None = None,
+    timeout_impl: TimeoutImpl | None = None,
 ) -> Callable[[Candidate], Verdict]:
     """Return a verdict function for the bisect core, folding in the quarantine rule.
 
     A candidate is replayed against the bundle's recorded trace; the oracle judges the
-    replayed trace. If the replay ``diverged`` or substituted a ``nearest`` output, the
-    verdict is forced to ``skip``. ``passthrough`` replays are surfaced via
-    ``on_passthrough`` but their oracle verdict stands.
+    replayed trace. If the replay ``diverged``, substituted a ``nearest`` output, or
+    ``timed_out``, the verdict is forced to ``skip``. ``passthrough`` replays are
+    surfaced via ``on_passthrough`` but their oracle verdict stands.
     """
 
     def verdict_fn(candidate: Candidate) -> Verdict:
@@ -72,8 +75,10 @@ def make_verdict_fn(
             bundle.trace,
             policy=policy,
             passthrough_executor=passthrough_executor,
+            timeout=timeout,
+            timeout_impl=timeout_impl,
         )
-        if result.diverged or result.has_nearest_substitutions:
+        if result.diverged or result.has_nearest_substitutions or result.timed_out:
             return Verdict.SKIP
         if result.used_passthrough and on_passthrough is not None:
             on_passthrough(candidate, result)
@@ -122,14 +127,24 @@ def _replay_for_artifacts(
     candidate: Candidate,
     bundle: RunBundle,
     policy: DivergencePolicy,
+    *,
+    timeout: float | None = None,
+    timeout_impl: TimeoutImpl | None = None,
 ) -> ReplayResult:
     """Replay a candidate for artifact building, returning the full quarantine-aware result.
 
     The caller must honor the quarantine rule (a ``diverged``/``has_nearest_substitutions``
-    result is non-reproducible) instead of forwarding a corrupt/empty trace to ``diff`` or
-    ``minimize``.
+    / ``timed_out`` result is non-reproducible) instead of forwarding a corrupt/empty
+    trace to ``diff`` or ``minimize``.
     """
-    return replay(runner, candidate.config, bundle.trace, policy=policy)
+    return replay(
+        runner,
+        candidate.config,
+        bundle.trace,
+        policy=policy,
+        timeout=timeout,
+        timeout_impl=timeout_impl,
+    )
 
 
 def run_bisection(
@@ -141,6 +156,8 @@ def run_bisection(
     policy: DivergencePolicy = DivergencePolicy.SKIP,
     passthrough_executor: Callable[[str, dict[str, Any]], Any] | None = None,
     max_probes: int | None = None,
+    timeout: float | None = None,
+    timeout_impl: TimeoutImpl | None = None,
 ) -> BisectionOutcome:
     """Run a full bisection over ``candidates`` and assemble report artifacts.
 
@@ -153,6 +170,9 @@ def run_bisection(
 
     ``max_probes`` is a hard cap on oracle verdicts (including endpoint probes). Hitting
     it returns an ambiguous range rather than a guessed culprit.
+
+    ``timeout`` is a per-candidate deadline in seconds (``None``/``0`` = no limit). An
+    overrun is quarantined as ``skip``, never treated as ``bad``.
     """
     passthrough_seen = {"value": False}
 
@@ -166,6 +186,8 @@ def run_bisection(
         policy=policy,
         passthrough_executor=passthrough_executor,
         on_passthrough=_note_passthrough,
+        timeout=timeout,
+        timeout_impl=timeout_impl,
     )
     result = bisect(candidates, verdict_fn, max_probes=max_probes)
 
@@ -174,17 +196,23 @@ def run_bisection(
     artifacts_unavailable: str | None = None
 
     if result.first_bad is not None and result.last_good is not None:
-        good = _replay_for_artifacts(runner, result.last_good, bundle, policy)
-        bad = _replay_for_artifacts(runner, result.first_bad, bundle, policy)
+        good = _replay_for_artifacts(
+            runner, result.last_good, bundle, policy, timeout=timeout, timeout_impl=timeout_impl
+        )
+        bad = _replay_for_artifacts(
+            runner, result.first_bad, bundle, policy, timeout=timeout, timeout_impl=timeout_impl
+        )
 
-        # Apply the quarantine rule to the artifact replays too: a diverged or
-        # nearest-substituted replay is non-reproducible, so never feed its trace to
-        # diff()/minimize() (that would corrupt the artifacts). Mark them unavailable.
+        # Apply the quarantine rule to the artifact replays too: a diverged,
+        # nearest-substituted, or timed-out replay is non-reproducible, so never feed
+        # its trace to diff()/minimize() (that would corrupt the artifacts).
         unreproducible = (
             good.diverged
             or good.has_nearest_substitutions
+            or good.timed_out
             or bad.diverged
             or bad.has_nearest_substitutions
+            or bad.timed_out
         )
         if unreproducible:
             artifacts_unavailable = (

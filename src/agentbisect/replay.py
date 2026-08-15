@@ -18,8 +18,10 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
+from . import timeout as timeout_mod
 from .agent import AgentRunner
 from .mock_tools import DivergenceError, DivergencePolicy, MockToolProvider
+from .timeout import CandidateTimeout, TimeoutImpl
 from .types import AgentConfig, ReplayResult, Trace
 
 __all__ = ["ReplayTemperatureWarning", "forced_determinism_params", "replay"]
@@ -51,6 +53,8 @@ def replay(
     *,
     policy: DivergencePolicy = DivergencePolicy.SKIP,
     passthrough_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+    timeout: float | None = None,
+    timeout_impl: TimeoutImpl | None = None,
 ) -> ReplayResult:
     """Replay ``candidate_config`` with tools mocked from ``recorded_trace``.
 
@@ -66,45 +70,62 @@ def replay(
         Divergence policy for tool calls with no in-order recorded match.
     passthrough_executor:
         Required only when ``policy`` is ``PASSTHROUGH``; performs live tool calls.
+    timeout:
+        Optional per-candidate deadline in seconds. ``None`` or ``0`` means no limit.
+    timeout_impl:
+        Wait strategy for a positive ``timeout``. Tests inject a fake-clock stub;
+        production uses a daemon thread. An overrun is returned as
+        ``timed_out=True`` (quarantined as skip), never as a bad verdict.
 
     Returns
     -------
     ReplayResult
         The replayed trace plus divergence/substitution/passthrough flags.
     """
-    captured_temp = candidate_config.params.get("temperature", 0)
-    if isinstance(captured_temp, (int, float)) and captured_temp != 0:
-        warnings.warn(
-            f"captured config used temperature={captured_temp!r}; forcing temperature=0 for "
-            "a reproducible replay (a flaky baseline cannot be cleanly bisected)",
-            ReplayTemperatureWarning,
-            stacklevel=2,
+
+    def _run() -> ReplayResult:
+        captured_temp = candidate_config.params.get("temperature", 0)
+        if isinstance(captured_temp, (int, float)) and captured_temp != 0:
+            warnings.warn(
+                f"captured config used temperature={captured_temp!r}; forcing temperature=0 for "
+                "a reproducible replay (a flaky baseline cannot be cleanly bisected)",
+                ReplayTemperatureWarning,
+                stacklevel=2,
+            )
+
+        forced_config = candidate_config.with_overrides(
+            params=forced_determinism_params(candidate_config.params)
+        )
+        provider = MockToolProvider(
+            recorded_trace,
+            policy=policy,
+            passthrough_executor=passthrough_executor,
         )
 
-    forced_config = candidate_config.with_overrides(
-        params=forced_determinism_params(candidate_config.params)
-    )
-    provider = MockToolProvider(
-        recorded_trace,
-        policy=policy,
-        passthrough_executor=passthrough_executor,
-    )
+        try:
+            trace = runner.run(forced_config, provider)
+        except DivergenceError as exc:
+            # SKIP / unmatched divergence: abort with a flagged, empty-ish result.
+            partial = Trace(final_output="")
+            return ReplayResult(
+                trace=partial,
+                diverged=True,
+                notes=(str(exc),),
+            )
+
+        return ReplayResult(
+            trace=trace,
+            diverged=provider.diverged,
+            has_nearest_substitutions=provider.has_nearest_substitutions,
+            used_passthrough=provider.used_passthrough,
+            notes=tuple(provider.notes),
+        )
 
     try:
-        trace = runner.run(forced_config, provider)
-    except DivergenceError as exc:
-        # SKIP / unmatched divergence: abort with a flagged, empty-ish result.
-        partial = Trace(final_output="")
+        return timeout_mod.run_with_timeout(_run, timeout, impl=timeout_impl)
+    except CandidateTimeout as exc:
         return ReplayResult(
-            trace=partial,
-            diverged=True,
+            trace=Trace(final_output=""),
+            timed_out=True,
             notes=(str(exc),),
         )
-
-    return ReplayResult(
-        trace=trace,
-        diverged=provider.diverged,
-        has_nearest_substitutions=provider.has_nearest_substitutions,
-        used_passthrough=provider.used_passthrough,
-        notes=tuple(provider.notes),
-    )

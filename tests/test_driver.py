@@ -10,10 +10,12 @@ import pytest
 
 from agentbisect.agent.fake import FakeAgent
 from agentbisect.agent.tools import ToolProvider
+from agentbisect.bisect import UntestableEndpointError
 from agentbisect.driver import ReplayDivergedWarning, make_verdict_fn, run_bisection
 from agentbisect.llm.backends import FakeLLM
 from agentbisect.mock_tools import DivergencePolicy
 from agentbisect.oracle import AssertionOracle, BackendError, FakeOracle, LLMJudge
+from agentbisect.timeout import CandidateTimeout, expire_after
 from agentbisect.types import AgentConfig, Candidate, RunBundle, Trace, Verdict
 
 
@@ -102,6 +104,108 @@ def test_nearest_substitution_is_quarantined_as_skip(fake_agent: FakeAgent) -> N
         ),
     )
     assert verdict_fn(subbed) is Verdict.SKIP
+
+
+def test_timeout_overrun_is_quarantined_as_skip(fake_agent: FakeAgent) -> None:
+    """A runner that 'sleeps' past the timeout (fake clock) yields skip, not bad."""
+    base = AgentConfig(
+        system_prompt="p",
+        model="m0",
+        params={"program": [{"tool": "search", "args": {"q": "x"}}], "final": "OUT"},
+    )
+    bundle = _capture(fake_agent, base)
+    oracle = FakeOracle(default=Verdict.BAD)  # would say BAD; timeout must win
+    verdict_fn = make_verdict_fn(
+        fake_agent, bundle, oracle, timeout=0.5, timeout_impl=expire_after(10.0)
+    )
+    candidate = Candidate(axis="model", ref="m0", order=0, config=base)
+    assert verdict_fn(candidate) is Verdict.SKIP
+
+
+def test_timeout_overrun_never_yields_first_bad(fake_agent: FakeAgent) -> None:
+    """Every candidate overrunning the deadline is untestable, never a culprit."""
+    good_prompt = "You are support. Always state the refund policy."
+    bundle = _capture(fake_agent, _regression_config("m0", good_prompt))
+    candidates = [
+        Candidate(
+            axis="model",
+            ref=f"m{i}",
+            order=i,
+            config=_regression_config(f"m{i}", good_prompt),
+        )
+        for i in range(3)
+    ]
+    oracle = AssertionOracle(lambda t, b: True)
+    with pytest.raises(UntestableEndpointError):
+        run_bisection(
+            fake_agent,
+            bundle,
+            candidates,
+            oracle,
+            timeout=0.25,
+            timeout_impl=expire_after(5.0),
+        )
+
+
+def test_interior_timeout_is_ambiguous_never_first_bad(fake_agent: FakeAgent) -> None:
+    """Endpoints finish; interior overruns are skip -> ambiguous, not first_bad."""
+    good_prompt = "You are support. Always state the refund policy."
+    bundle = _capture(fake_agent, _regression_config("m0", good_prompt))
+    prompts = [
+        good_prompt,
+        good_prompt,
+        "You are support. Be brief.",
+        "You are support. Be brief.",
+        "You are support. Be brief.",
+    ]
+    candidates = [
+        Candidate(
+            axis="model",
+            ref=f"m{i}",
+            order=i,
+            config=_regression_config(f"m{i}", prompts[i]),
+        )
+        for i in range(5)
+    ]
+    calls = {"n": 0}
+
+    def impl(fn: Any, seconds: float) -> Any:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return fn()
+        raise CandidateTimeout(f"candidate timed out after {seconds}s")
+
+    oracle = AssertionOracle(lambda t, b: t.final_output == "refund_clause=yes")
+    outcome = run_bisection(fake_agent, bundle, candidates, oracle, timeout=0.5, timeout_impl=impl)
+    assert outcome.result.first_bad is None
+    assert outcome.result.is_ambiguous
+
+
+def test_fast_runner_with_timeout_is_unaffected(fake_agent: FakeAgent) -> None:
+    """A runner that finishes under the deadline still isolates first_bad."""
+    good_prompt = "You are support. Always state the refund policy."
+    bundle = _capture(fake_agent, _regression_config("m0", good_prompt))
+    prompts = [good_prompt, good_prompt, "You are support. Be brief."]
+    candidates = [
+        Candidate(
+            axis="model",
+            ref=f"m{i}",
+            order=i,
+            config=_regression_config(f"m{i}", prompts[i]),
+        )
+        for i in range(3)
+    ]
+    oracle = AssertionOracle(lambda t, b: t.final_output == "refund_clause=yes")
+    outcome = run_bisection(
+        fake_agent,
+        bundle,
+        candidates,
+        oracle,
+        timeout=5.0,
+        timeout_impl=expire_after(0.0),
+    )
+    assert outcome.result.first_bad is not None
+    assert outcome.result.first_bad.order == 2
 
 
 def test_matching_replay_uses_oracle_verdict(fake_agent: FakeAgent) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from agentbisect.bundle import BUNDLE_FILENAME
@@ -1015,6 +1016,136 @@ def test_report_passthrough_reexecutes_live_and_reports_first_bad(tmp_path: Path
     assert "First bad change" in res.output
     assert marker.exists()
     assert "CALLED" in marker.read_text(encoding="utf-8")
+
+
+def test_bisect_timeout_overrun_is_untestable_never_first_bad(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stub that expires instantly makes every candidate skip (untestable), never first_bad."""
+    from agentbisect.timeout import expire_after, run_with_timeout
+
+    def stub(fn, seconds, *, impl=None):  # type: ignore[no-untyped-def]
+        return run_with_timeout(fn, seconds, impl=expire_after(99.0))
+
+    monkeypatch.setattr("agentbisect.timeout.run_with_timeout", stub)
+
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--timeout",
+            "0.5",
+        ],
+    )
+    assert res.exit_code == 3, res.output
+    assert "skip" in res.output.lower()
+    assert "First bad change" not in res.output
+
+
+def test_bisect_timeout_fast_runner_unaffected(tmp_path: Path) -> None:
+    """A fast runner with --timeout set still isolates first_bad (no sleep)."""
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--timeout",
+            "30",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["first_bad"] == "final=refund=no"
+
+
+def test_bisect_timeout_zero_is_no_limit(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--timeout",
+            "0",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["first_bad"] == "final=refund=no"
+
+
+def test_replay_timeout_overrun_is_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentbisect.timeout import expire_after, run_with_timeout
+
+    def stub(fn, seconds, *, impl=None):  # type: ignore[no-untyped-def]
+        return run_with_timeout(fn, seconds, impl=expire_after(99.0))
+
+    monkeypatch.setattr("agentbisect.timeout.run_with_timeout", stub)
+
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        ["replay", "--bundle", str(out), "--config", str(cfg), "--timeout", "0.5"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "timed_out=True" in res.output
+
+
+def test_bisect_negative_timeout_is_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--timeout",
+            "-1",
+        ],
+    )
+    assert res.exit_code == 4, res.output
 
 
 def test_bisect_max_probes_stops_and_is_ambiguous(tmp_path: Path) -> None:
