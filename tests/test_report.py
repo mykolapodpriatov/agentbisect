@@ -66,6 +66,29 @@ def test_markdown_ambiguous() -> None:
     assert "LIVE tool execution" in md  # passthrough note surfaced
 
 
+def test_markdown_and_json_surface_probe_cap_reason() -> None:
+    lo = _cand(0, "lo-sha")
+    hi = _cand(6, "hi-sha")
+    result = BisectResult(
+        axis="model",
+        first_bad=None,
+        last_good=lo,
+        ambiguous_range=(lo, hi),
+        steps_tested=((lo, Verdict.GOOD), (hi, Verdict.BAD)),
+        probes=3,
+        stop_reason="stopped after 3 probes (max-probes=3); no single first-bad isolated",
+    )
+    outcome = BisectionOutcome(
+        result, minimal_repro=None, behavioral_diff=None, used_passthrough=False
+    )
+    md = render_markdown(outcome)
+    assert "max-probes=3" in md
+    assert "untestable (skipped)" not in md
+    data = json.loads(render_json(outcome))
+    assert data["stop_reason"] == result.stop_reason
+    assert "max-probes=3" in render_html(outcome)
+
+
 def test_rich_first_bad_renders() -> None:
     console = Console(record=True, width=100)
     render_rich(_first_bad_outcome(), console)

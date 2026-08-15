@@ -207,8 +207,10 @@ class BisectResult(_Frozen):
 
     ``first_bad`` is populated *only* for a directly-adjacent confirmed
     good->bad transition. When the boundary is undetermined (skips at the edge, an
-    all-skip interval) ``first_bad`` is ``None`` and ``ambiguous_range`` holds the
-    bracketing ``[last_good, first_bad_or_unknown]`` candidates instead.
+    all-skip interval, or a ``max_probes`` cap) ``first_bad`` is ``None`` and
+    ``ambiguous_range`` holds the bracketing ``[last_good, first_bad_or_unknown]``
+    candidates instead. ``stop_reason`` explains a cap-hit (or similar) so the
+    report never implies a skip-at-boundary when the search was budget-capped.
     """
 
     axis: str
@@ -217,6 +219,7 @@ class BisectResult(_Frozen):
     ambiguous_range: tuple[Candidate, Candidate] | None = None
     steps_tested: tuple[tuple[Candidate, Verdict], ...] = ()
     probes: int = 0
+    stop_reason: str | None = None
 
     @property
     def is_ambiguous(self) -> bool:

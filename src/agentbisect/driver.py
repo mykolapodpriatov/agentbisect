@@ -140,6 +140,7 @@ def run_bisection(
     *,
     policy: DivergencePolicy = DivergencePolicy.SKIP,
     passthrough_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+    max_probes: int | None = None,
 ) -> BisectionOutcome:
     """Run a full bisection over ``candidates`` and assemble report artifacts.
 
@@ -149,6 +150,9 @@ def run_bisection(
     ``passthrough_executor`` is required only when ``policy`` is ``PASSTHROUGH``; it is
     forwarded to :func:`make_verdict_fn` so unmatched tool calls during the search are
     re-executed live instead of degrading to a quarantined ``skip``.
+
+    ``max_probes`` is a hard cap on oracle verdicts (including endpoint probes). Hitting
+    it returns an ambiguous range rather than a guessed culprit.
     """
     passthrough_seen = {"value": False}
 
@@ -163,7 +167,7 @@ def run_bisection(
         passthrough_executor=passthrough_executor,
         on_passthrough=_note_passthrough,
     )
-    result = bisect(candidates, verdict_fn)
+    result = bisect(candidates, verdict_fn, max_probes=max_probes)
 
     minimal_repro: Trace | None = None
     behavioral_diff: BehavioralDiff | None = None

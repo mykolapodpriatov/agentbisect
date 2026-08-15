@@ -1017,6 +1017,89 @@ def test_report_passthrough_reexecutes_live_and_reports_first_bad(tmp_path: Path
     assert "CALLED" in marker.read_text(encoding="utf-8")
 
 
+def test_bisect_max_probes_stops_and_is_ambiguous(tmp_path: Path) -> None:
+    """A 7-candidate axis with --max-probes 3 stops after 3 verdicts (exit 2)."""
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    # 3 good + 4 bad = 7 candidates; cap of 3 probes cannot isolate a single culprit.
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=yes,refund=yes,refund=no,refund=no,refund=no,refund=no",
+            "--max-probes",
+            "3",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 2, res.output
+    data = json.loads(res.output)
+    assert data["probes"] == 3
+    assert data["first_bad"] is None
+    assert data["stop_reason"] is not None
+    assert "max-probes" in data["stop_reason"]
+
+
+def test_bisect_max_probes_under_cap_finds_first_bad(tmp_path: Path) -> None:
+    """A tiny axis that finishes under the cap is unchanged."""
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--max-probes",
+            "10",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["first_bad"] == "final=refund=no"
+    assert data["stop_reason"] is None
+
+
+def test_bisect_max_probes_less_than_two_is_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--max-probes",
+            "1",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+    assert "max-probes" in res.output.lower()
+
+
 def test_bisect_backend_failure_is_clean_error_not_traceback(tmp_path: Path) -> None:
     """A raising LLMJudge backend exits with a clean BackendError, not a raw traceback."""
     cfg = tmp_path / "boom_project.py"
