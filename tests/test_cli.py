@@ -1017,6 +1017,79 @@ def test_report_passthrough_reexecutes_live_and_reports_first_bad(tmp_path: Path
     assert "CALLED" in marker.read_text(encoding="utf-8")
 
 
+def test_bisect_backend_failure_is_clean_error_not_traceback(tmp_path: Path) -> None:
+    """A raising LLMJudge backend exits with a clean BackendError, not a raw traceback."""
+    cfg = tmp_path / "boom_project.py"
+    cfg.write_text(
+        """
+from agentbisect.agent.fake import FakeAgent
+from agentbisect.oracle import LLMJudge
+from agentbisect.types import AgentConfig
+
+
+class BoomBackend:
+    def complete(self, system, user):
+        raise RuntimeError("rate limited")
+
+    @property
+    def resolved_model_id(self):
+        return "boom-model"
+
+
+def runner():
+    return FakeAgent()
+
+
+def config():
+    return AgentConfig(
+        system_prompt="You are support. Always state the refund policy.",
+        model="m0",
+        params={
+            "program": [{"tool": "kb", "args": {"q": "policy"}}],
+            "final": "refund={prompt_has:refund}",
+        },
+    )
+
+
+def tool_executor():
+    def run(tool, args):
+        return f"{tool}-result"
+    return run
+
+
+def oracle():
+    return LLMJudge(BoomBackend())
+""",
+        encoding="utf-8",
+    )
+    out = tmp_path / "bundle"
+    cap = runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    assert cap.exit_code == 0, cap.output
+
+    res = runner.invoke(
+        app,
+        [
+            "bisect",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+        ],
+    )
+    assert res.exit_code == 5, res.output
+    text = " ".join(res.output.split())
+    assert "error:" in text.lower()
+    assert "m0" in text
+    assert "rate limited" in text
+    # CliRunner surfaces typer.Exit, not the raw backend exception.
+    assert not isinstance(res.exception, RuntimeError)
+    assert "Traceback" not in res.output
+
+
 def test_passthrough_without_tool_executor_hook_fails_fast(tmp_path: Path) -> None:
     # A project config that defines runner()/oracle() but NOT tool_executor(): choosing
     # --policy passthrough must fail fast with a clear usage error instead of silently

@@ -6,11 +6,14 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from agentbisect.agent.fake import FakeAgent
 from agentbisect.agent.tools import ToolProvider
 from agentbisect.driver import ReplayDivergedWarning, make_verdict_fn, run_bisection
+from agentbisect.llm.backends import FakeLLM
 from agentbisect.mock_tools import DivergencePolicy
-from agentbisect.oracle import AssertionOracle, FakeOracle
+from agentbisect.oracle import AssertionOracle, BackendError, FakeOracle, LLMJudge
 from agentbisect.types import AgentConfig, Candidate, RunBundle, Trace, Verdict
 
 
@@ -31,6 +34,27 @@ def _capture(agent: FakeAgent, config: AgentConfig) -> RunBundle:
 
 
 # ----------------------------------------------------------------- quarantine rule
+
+
+def test_backend_error_from_judge_names_the_candidate(fake_agent: FakeAgent) -> None:
+    """A raising judge backend is re-raised with the failing candidate's ref, not SKIP."""
+    base = AgentConfig(
+        system_prompt="p",
+        model="m0",
+        params={"program": [{"tool": "search", "args": {"q": "x"}}], "final": "OUT"},
+    )
+    bundle = _capture(fake_agent, base)
+
+    def boom(system: str, user: str) -> str:
+        raise RuntimeError("expired api key")
+
+    oracle = LLMJudge(FakeLLM(boom))
+    verdict_fn = make_verdict_fn(fake_agent, bundle, oracle)
+    candidate = Candidate(axis="model", ref="m0", order=0, config=base)
+    with pytest.raises(BackendError, match="m0") as caught:
+        verdict_fn(candidate)
+    assert caught.value.candidate_ref == "m0"
+    assert caught.value.candidate_order == 0
 
 
 def test_diverged_replay_is_quarantined_as_skip(fake_agent: FakeAgent) -> None:

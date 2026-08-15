@@ -10,6 +10,7 @@ import pytest
 from agentbisect.llm.backends import FakeLLM
 from agentbisect.oracle import (
     AssertionOracle,
+    BackendError,
     FakeOracle,
     JudgeCache,
     LLMJudge,
@@ -109,6 +110,33 @@ def test_llm_judge_undecidable_is_skip() -> None:
 def test_llm_judge_good_verdict() -> None:
     judge = LLMJudge(FakeLLM(lambda s, u: "GOOD"), cache=JudgeCache())
     assert judge.judge(_trace(), _bundle()) is Verdict.GOOD
+
+
+def test_llm_judge_backend_failure_is_backend_error_not_skip() -> None:
+    """A raising backend must surface as BackendError, never a silent SKIP verdict."""
+
+    def boom(system: str, user: str) -> str:
+        raise RuntimeError("rate limited")
+
+    judge = LLMJudge(FakeLLM(boom), cache=JudgeCache())
+    bundle = _bundle(label="case-7")
+    with pytest.raises(BackendError, match="case-7") as caught:
+        judge.judge(_trace(), bundle)
+    assert caught.value.bundle_label == "case-7"
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert "rate limited" in str(caught.value)
+
+
+def test_llm_judge_malformed_payload_keyerror_is_backend_error() -> None:
+    """A KeyError (malformed provider payload) is wrapped, not leaked as a raw exception."""
+
+    def missing_key(system: str, user: str) -> str:
+        raise KeyError("response")
+
+    judge = LLMJudge(FakeLLM(missing_key), cache=JudgeCache())
+    with pytest.raises(BackendError, match="KeyError") as caught:
+        judge.judge(_trace(), _bundle())
+    assert isinstance(caught.value.__cause__, KeyError)
 
 
 # ----------------------------------------------------- verdict parsing (exact one word)
