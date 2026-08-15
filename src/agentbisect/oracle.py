@@ -45,11 +45,35 @@ from .types import RunBundle, Trace, Verdict
 __all__ = [
     "DEFAULT_JUDGE_PROMPT",
     "AssertionOracle",
+    "BackendError",
     "FakeOracle",
     "JudgeCache",
     "LLMJudge",
     "Oracle",
 ]
+
+
+class BackendError(Exception):
+    """Raised when an LLM judge backend call fails.
+
+    A transient provider failure (rate limit, timeout, expired key, malformed
+    payload) is not a verdict: it must not be mapped to ``Verdict.SKIP``, which
+    would quarantine an outage into a misleading ambiguous range.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        candidate_ref: str | None = None,
+        candidate_order: int | None = None,
+        bundle_label: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.candidate_ref = candidate_ref
+        self.candidate_order = candidate_order
+        self.bundle_label = bundle_label
+
 
 #: Default judge instruction. Bumping ``judge_version`` invalidates cached verdicts.
 DEFAULT_JUDGE_PROMPT = (
@@ -338,7 +362,16 @@ class LLMJudge:
         if cached is not None:
             return cached
 
-        answer = self._backend.complete(self._judge_prompt, user)
+        try:
+            answer = self._backend.complete(self._judge_prompt, user)
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError(
+                f"LLM judge backend failed while judging bundle {bundle.label!r} "
+                f"(model {bundle.config.model!r}): {type(exc).__name__}: {exc}",
+                bundle_label=bundle.label,
+            ) from exc
         verdict = _parse_verdict(answer)
 
         # The backend has now resolved the concrete model id; memoize it and re-key so an

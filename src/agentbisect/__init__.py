@@ -29,7 +29,7 @@ from .diff import BehavioralDiff, diff
 from .driver import BisectionOutcome, make_verdict_fn, run_bisection
 from .minimize import minimize
 from .mock_tools import DivergencePolicy
-from .oracle import AssertionOracle, FakeOracle, LLMJudge, Oracle
+from .oracle import AssertionOracle, BackendError, FakeOracle, LLMJudge, Oracle
 from .replay import ReplayTemperatureWarning, replay
 from .types import (
     AgentConfig,
@@ -84,6 +84,7 @@ __all__ = [
     # oracle
     "Oracle",
     "AssertionOracle",
+    "BackendError",
     "FakeOracle",
     "LLMJudge",
     # axes

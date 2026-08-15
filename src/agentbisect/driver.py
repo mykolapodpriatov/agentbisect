@@ -26,7 +26,7 @@ from .agent import AgentRunner
 from .bisect import bisect
 from .diff import BehavioralDiff, diff
 from .mock_tools import DivergencePolicy
-from .oracle import Oracle
+from .oracle import BackendError, Oracle
 from .replay import replay
 from .types import BisectResult, Candidate, ReplayResult, RunBundle, Trace, Verdict
 
@@ -77,7 +77,18 @@ def make_verdict_fn(
             return Verdict.SKIP
         if result.used_passthrough and on_passthrough is not None:
             on_passthrough(candidate, result)
-        return oracle.judge(result.trace, bundle)
+        try:
+            return oracle.judge(result.trace, bundle)
+        except BackendError as exc:
+            if exc.candidate_ref is not None:
+                raise
+            raise BackendError(
+                f"LLM judge backend failed on candidate {candidate.ref!r} "
+                f"(axis {candidate.axis!r}, order {candidate.order}): {exc}",
+                candidate_ref=candidate.ref,
+                candidate_order=candidate.order,
+                bundle_label=exc.bundle_label,
+            ) from exc
 
     return verdict_fn
 

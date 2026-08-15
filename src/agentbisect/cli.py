@@ -9,7 +9,8 @@ Commands:
 * ``report``   -- re-render a bisection report from a bundle + axis (alias of bisect's report).
 
 Exit codes: ``0`` success / first-bad found, ``2`` ambiguous range, ``3`` a bisect
-precondition failed (untestable endpoint / non-monotonic), ``4`` a usage/config error.
+precondition failed (untestable endpoint / non-monotonic), ``4`` a usage/config error,
+``5`` an LLM judge backend failure.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from .config import ConfigError, load_project_config
 from .diff import diff as diff_traces
 from .driver import run_bisection
 from .mock_tools import DivergencePolicy
+from .oracle import BackendError
 from .report import (
     render_diff_json,
     render_diff_markdown,
@@ -56,6 +58,7 @@ EXIT_OK = 0
 EXIT_AMBIGUOUS = 2
 EXIT_BISECT_ERROR = 3
 EXIT_USAGE = 4
+EXIT_BACKEND = 5
 
 
 def _fail(message: str, code: int) -> NoReturn:
@@ -210,6 +213,8 @@ def bisect(
         )
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
+    except BackendError as exc:
+        _fail(str(exc), EXIT_BACKEND)
 
     if json_output:
         # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
@@ -267,13 +272,16 @@ def replay(
             _fail(f"unsupported override {key!r}", EXIT_USAGE)
 
     candidate_config = run_bundle.config.with_overrides(**changes)
-    result = do_replay(
-        runner,
-        candidate_config,
-        run_bundle.trace,
-        policy=policy,
-        passthrough_executor=passthrough_executor,
-    )
+    try:
+        result = do_replay(
+            runner,
+            candidate_config,
+            run_bundle.trace,
+            policy=policy,
+            passthrough_executor=passthrough_executor,
+        )
+    except BackendError as exc:
+        _fail(str(exc), EXIT_BACKEND)
     console.print(
         f"diverged={result.diverged} "
         f"nearest={result.has_nearest_substitutions} "
@@ -369,6 +377,8 @@ def report(
         )
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
+    except BackendError as exc:
+        _fail(str(exc), EXIT_BACKEND)
     if json_output:
         # Bypass Rich entirely so brackets are not parsed as markup and lines are not wrapped.
         print(render_json(outcome))
