@@ -188,12 +188,21 @@ def bisect(
             help="Hard cap on verdict probes, including both endpoints. Omit for no cap.",
         ),
     ] = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout",
+            help="Per-candidate timeout in seconds. 0 or omit means no limit.",
+        ),
+    ] = None,
 ) -> None:
     """Bisect an axis over a captured bundle and report the first bad change."""
     if sum((markdown, json_output, html_output)) > 1:
         _fail("--markdown, --json, and --html are mutually exclusive", EXIT_USAGE)
     if max_probes is not None and max_probes < 2:
         _fail("--max-probes must be at least 2 (both endpoints must be probed)", EXIT_USAGE)
+    if timeout is not None and timeout < 0:
+        _fail("--timeout must be >= 0 (0 means no limit)", EXIT_USAGE)
 
     try:
         run_bundle = load_bundle(bundle)
@@ -220,6 +229,7 @@ def bisect(
             policy=policy,
             passthrough_executor=passthrough_executor,
             max_probes=max_probes,
+            timeout=timeout,
         )
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
@@ -251,6 +261,13 @@ def replay(
     policy: Annotated[
         DivergencePolicy, typer.Option("--policy", help="Divergence policy.")
     ] = DivergencePolicy.SKIP,
+    timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout",
+            help="Per-candidate timeout in seconds. 0 or omit means no limit.",
+        ),
+    ] = None,
 ) -> None:
     """Replay a bundle once under axis overrides and print divergence flags."""
     from .replay import replay as do_replay
@@ -281,6 +298,9 @@ def replay(
         else:
             _fail(f"unsupported override {key!r}", EXIT_USAGE)
 
+    if timeout is not None and timeout < 0:
+        _fail("--timeout must be >= 0 (0 means no limit)", EXIT_USAGE)
+
     candidate_config = run_bundle.config.with_overrides(**changes)
     try:
         result = do_replay(
@@ -289,13 +309,15 @@ def replay(
             run_bundle.trace,
             policy=policy,
             passthrough_executor=passthrough_executor,
+            timeout=timeout,
         )
     except BackendError as exc:
         _fail(str(exc), EXIT_BACKEND)
     console.print(
         f"diverged={result.diverged} "
         f"nearest={result.has_nearest_substitutions} "
-        f"passthrough={result.used_passthrough}"
+        f"passthrough={result.used_passthrough} "
+        f"timed_out={result.timed_out}"
     )
     console.print(f"final: {result.trace.final_output!r}")
     for note in result.notes:

@@ -156,7 +156,8 @@ class ReplayResult(_Frozen):
     """The outcome of replaying a candidate config against a recorded trace.
 
     The bisect engine consumes this (not a bare trace) so it can apply the quarantine
-    rule: a ``diverged`` or ``has_nearest_substitutions`` result is treated as ``skip``.
+    rule: a ``diverged``, ``has_nearest_substitutions``, or ``timed_out`` result is
+    treated as ``skip``.
     """
 
     trace: Trace
@@ -166,6 +167,8 @@ class ReplayResult(_Frozen):
     has_nearest_substitutions: bool = False
     #: A real tool was re-executed (explicit ``passthrough`` opt-in).
     used_passthrough: bool = False
+    #: The per-candidate ``--timeout`` fired before the runner returned.
+    timed_out: bool = False
     #: Human-readable notes (e.g. the divergence point) for the report.
     notes: tuple[str, ...] = ()
 
