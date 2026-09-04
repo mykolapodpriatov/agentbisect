@@ -21,11 +21,17 @@ Guarantees:
   :class:`NonMonotonicError` -- never a confidently-wrong ``first_bad``.
 * **Bounded probes.** Total probes are bounded; the function always terminates.
   An optional ``max_probes`` cap aborts as an ambiguous range rather than guessing.
+* **Determinism under ``workers > 1``.** Probes may be dispatched concurrently, but
+  verdicts are folded into the memo in the deterministic index order, so the chosen
+  candidate, the flaky candidate that is detected, and ``steps_tested`` never depend
+  on which thread finished first. Concurrency buys wall-clock, never a different
+  answer -- at the cost of extra probes, since a wave cannot stop early.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 from .types import BisectResult, Candidate, Verdict
 
@@ -78,9 +84,45 @@ class _Memo:
         """Return the verdict for ``candidates[idx]``, detecting flaky re-probes."""
         if self._max_probes is not None and self.probes >= self._max_probes:
             raise _ProbeCapReached
+        return self._record(candidates, idx, self._fn(candidates[idx]))
+
+    def get_many(
+        self,
+        candidates: Sequence[Candidate],
+        indices: Sequence[int],
+        workers: int,
+    ) -> dict[int, Verdict]:
+        """Probe ``indices`` concurrently, returning ``{index: verdict}``.
+
+        Verdicts are folded into the memo strictly in the order ``indices`` were
+        given, never in completion order, so ``steps_tested``, the probe count
+        and flaky detection stay identical to a sequential run. The returned map
+        may be SHORTER than ``indices`` when ``max_probes`` cuts the batch off:
+        the prefix that fits the budget is probed, which is exactly the prefix a
+        sequential run would have reached.
+
+        A ``verdict_fn`` that raises propagates from the first failing index in
+        order, again so the error does not depend on thread scheduling.
+        """
+        budgeted = list(indices)
+        if self._max_probes is not None:
+            remaining = self._max_probes - self.probes
+            if remaining <= 0:
+                raise _ProbeCapReached
+            budgeted = budgeted[:remaining]
+        if not budgeted:
+            return {}
+        if workers <= 1 or len(budgeted) == 1:
+            return {idx: self.get(candidates, idx) for idx in budgeted}
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(budgeted))) as pool:
+            futures = {idx: pool.submit(self._fn, candidates[idx]) for idx in budgeted}
+            return {idx: self._record(candidates, idx, futures[idx].result()) for idx in budgeted}
+
+    def _record(self, candidates: Sequence[Candidate], idx: int, fresh: Verdict) -> Verdict:
+        """Book one verdict: count it, check flakiness, append to the trail."""
         candidate = candidates[idx]
         self.probes += 1
-        fresh = self._fn(candidate)
         if idx in self._cache and self._cache[idx] != fresh:
             raise NonMonotonicError(
                 f"candidate at order {candidate.order} (ref {candidate.ref!r}) returned "
@@ -97,6 +139,7 @@ def bisect(
     verdict_fn: VerdictFn,
     *,
     max_probes: int | None = None,
+    workers: int = 1,
 ) -> BisectResult:
     """Binary-search ``candidates`` (ordered old->new) for the first bad change.
 
@@ -112,6 +155,22 @@ def bisect(
         Optional hard cap on ``verdict_fn`` calls, including the two endpoint probes.
         ``None`` means no cap. Hitting the cap returns the current bracket as an
         ambiguous range (``first_bad=None``) rather than a guessed culprit.
+    workers:
+        How many ``verdict_fn`` calls may be in flight at once. ``1`` (the default)
+        is the sequential search. Above 1, the two endpoint probes run together and
+        the skip fan-out is probed in waves.
+
+        The result is unchanged: verdicts are folded in deterministic index order,
+        and a wave still resolves to the first non-skip *in that order*, not the
+        first to return. What does change is cost. A sequential fan-out stops at
+        the first answer; a wave probes the whole wave, so ``probes`` and
+        ``steps_tested`` grow. On a paid LLM judge that is real money, which is why
+        this is opt-in.
+
+        ``verdict_fn`` must be safe to call from several threads at once. The
+        default one built by :func:`agentbisect.driver.make_verdict_fn` calls the
+        project's ``AgentRunner``, and nothing in that contract promises thread
+        safety, so leave this at 1 unless the runner is known to be reentrant.
 
     Returns
     -------
@@ -122,7 +181,8 @@ def bisect(
     Raises
     ------
     ValueError
-        If fewer than two candidates are supplied, or ``max_probes`` is set and ``< 2``.
+        If fewer than two candidates are supplied, ``max_probes`` is set and ``< 2``,
+        or ``workers`` is below 1.
     UntestableEndpointError
         If an endpoint resolves ``skip``.
     NonMonotonicError
@@ -133,12 +193,23 @@ def bisect(
         raise ValueError("bisect requires at least two candidates")
     if max_probes is not None and max_probes < 2:
         raise ValueError("max_probes must be at least 2 (both endpoints must be probed)")
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
 
     memo = _Memo(verdict_fn, max_probes=max_probes)
 
     # --- Endpoint validation (explicit first step) -------------------------------
-    lo_verdict = memo.get(candidates, 0)
-    hi_verdict = memo.get(candidates, n - 1)
+    # The two endpoints are independent, so with workers > 1 they go out together
+    # rather than costing two serial round trips on every run.
+    if workers > 1:
+        endpoints = memo.get_many(candidates, (0, n - 1), workers)
+        if len(endpoints) < 2:
+            raise _ProbeCapReached
+        lo_verdict = endpoints[0]
+        hi_verdict = endpoints[n - 1]
+    else:
+        lo_verdict = memo.get(candidates, 0)
+        hi_verdict = memo.get(candidates, n - 1)
 
     if lo_verdict is Verdict.SKIP or hi_verdict is Verdict.SKIP:
         # Check each endpoint independently so a both-skip case names *both* ends.
@@ -171,7 +242,7 @@ def bisect(
     try:
         while hi > lo + 1:
             mid = (lo + hi) // 2
-            verdict, resolved = _probe_with_skip(candidates, memo, mid, lo, hi)
+            verdict, resolved = _probe_with_skip(candidates, memo, mid, lo, hi, workers=workers)
             if verdict is None:
                 # The entire open interval (lo, hi) is skip -> ambiguous range.
                 break
@@ -195,23 +266,15 @@ def bisect(
     return _build_result(candidates, memo, lo, hi)
 
 
-def _probe_with_skip(
-    candidates: Sequence[Candidate],
-    memo: _Memo,
-    mid: int,
-    lo: int,
-    hi: int,
-) -> tuple[Verdict | None, int | None]:
-    """Probe ``mid``; on ``skip`` fan out (mid-1, mid+1, mid-2, ...) within ``(lo, hi)``.
+def _outward_order(mid: int, lo: int, hi: int) -> list[int]:
+    """The probe order for one search step: ``mid``, then out symmetrically.
 
-    Returns ``(verdict, index)`` for the first non-skip candidate found, or
-    ``(None, None)`` when every index in the open interval ``(lo, hi)`` is skip.
+    ``mid - 1``, ``mid + 1``, ``mid - 2``, ... staying strictly inside the open
+    interval ``(lo, hi)``. Materialising the order (rather than walking it) is
+    what lets a wave be dispatched concurrently while the *choice* among its
+    results stays this exact, deterministic sequence.
     """
-    verdict = memo.get(candidates, mid)
-    if verdict is not Verdict.SKIP:
-        return verdict, mid
-
-    # Fan outward symmetrically, staying strictly inside (lo, hi).
+    order = [mid]
     offset = 1
     while True:
         left = mid - offset
@@ -219,16 +282,52 @@ def _probe_with_skip(
         left_ok = left > lo
         right_ok = right < hi
         if not left_ok and not right_ok:
-            return None, None
+            return order
         if left_ok:
-            v = memo.get(candidates, left)
-            if v is not Verdict.SKIP:
-                return v, left
+            order.append(left)
         if right_ok:
-            v = memo.get(candidates, right)
-            if v is not Verdict.SKIP:
-                return v, right
+            order.append(right)
         offset += 1
+
+
+def _probe_with_skip(
+    candidates: Sequence[Candidate],
+    memo: _Memo,
+    mid: int,
+    lo: int,
+    hi: int,
+    *,
+    workers: int = 1,
+) -> tuple[Verdict | None, int | None]:
+    """Probe ``mid``; on ``skip`` fan out (mid-1, mid+1, mid-2, ...) within ``(lo, hi)``.
+
+    Returns ``(verdict, index)`` for the first non-skip candidate in that order, or
+    ``(None, None)`` when every index in the open interval ``(lo, hi)`` is skip.
+
+    With ``workers > 1`` the order is probed in waves instead of one at a time,
+    and the winner is still the first non-skip *in the order*, not the first to
+    return. A wave cannot stop early, so it costs probes a sequential walk would
+    have saved.
+    """
+    order = _outward_order(mid, lo, hi)
+
+    if workers <= 1:
+        for idx in order:
+            verdict = memo.get(candidates, idx)
+            if verdict is not Verdict.SKIP:
+                return verdict, idx
+        return None, None
+
+    for start in range(0, len(order), workers):
+        wave = order[start : start + workers]
+        verdicts = memo.get_many(candidates, wave, workers)
+        for idx in wave:
+            if idx not in verdicts:
+                # The probe cap cut the wave short; nothing further was probed.
+                return None, None
+            if verdicts[idx] is not Verdict.SKIP:
+                return verdicts[idx], idx
+    return None, None
 
 
 def _build_result(

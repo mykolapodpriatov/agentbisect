@@ -97,6 +97,21 @@ agentbisect replay --bundle bundle/ --config examples/project.py --override mode
 agentbisect diff bundleA/ bundleB/
 ```
 
+### `--workers`: wall-clock, not fewer probes
+
+Every probe is one full replay plus one oracle judgement, so a bisection is that cost times `log2(n)`, serially. `bisect --workers N` overlaps the two independent endpoint probes and probes the skip fan-out in waves:
+
+```bash
+agentbisect bisect --bundle bundle/ --config examples/project.py \
+    --axis model --over gpt-4o-mini,gpt-4o,gpt-4.1 --workers 4
+```
+
+The result does not change. Verdicts are folded into the trail in index order rather than completion order, and a wave still resolves to the first non-skip *in the outward order*, not the first to answer, so the culprit, the flaky candidate that gets caught, and `steps_tested` are identical to a sequential run.
+
+What does change is cost. A sequential fan-out stops at the first answer; a wave cannot, so `probes` grows. On a paid LLM judge that is real money, which is why this is opt-in and off by default. `--max-probes` is still a hard cap: a wave is truncated to the remaining budget rather than blowing through it.
+
+One requirement: your `AgentRunner` has to be safe to call from several threads at once. Nothing in that contract promises it, so leave `--workers` at 1 unless you know your runner is reentrant.
+
 Both `bisect` and `report` accept `--json` for a stable, pipe-safe report (mutually
 exclusive with `--markdown`); the JSON carries exactly the facts the Markdown report does
 (axis, probes, first-bad/last-good, ambiguous range, per-step verdicts, behavioral diff,
@@ -163,7 +178,8 @@ CI runs lint + format + type-check + tests on Python 3.11, 3.12, and 3.13.
 - [x] Pure bisection core with good/bad/skip + quarantine of fabricated tool output
 - [x] First-bad-change report with minimal repro + behavioral diff
 - [x] LLM-judge / assertion oracle; prompt-git and model-list axes
-- [ ] Parallel candidate evaluation; HTML culprit report
+- [x] HTML culprit report (`report --html`)
+- [x] Parallel candidate evaluation (`bisect --workers N`)
 - [ ] Adapter to drive a real agent framework end-to-end
 
 ## License
