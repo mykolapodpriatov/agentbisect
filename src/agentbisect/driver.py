@@ -158,6 +158,7 @@ def run_bisection(
     max_probes: int | None = None,
     timeout: float | None = None,
     timeout_impl: TimeoutImpl | None = None,
+    workers: int = 1,
 ) -> BisectionOutcome:
     """Run a full bisection over ``candidates`` and assemble report artifacts.
 
@@ -173,6 +174,11 @@ def run_bisection(
 
     ``timeout`` is a per-candidate deadline in seconds (``None``/``0`` = no limit). An
     overrun is quarantined as ``skip``, never treated as ``bad``.
+
+    ``workers`` is how many candidate evaluations may be in flight at once. It buys
+    wall-clock without changing the result (see :func:`agentbisect.bisect.bisect`),
+    but it costs extra probes and it requires ``runner`` to be safe to call from
+    several threads. Leave it at 1 unless the runner is known to be reentrant.
     """
     passthrough_seen = {"value": False}
 
@@ -189,7 +195,7 @@ def run_bisection(
         timeout=timeout,
         timeout_impl=timeout_impl,
     )
-    result = bisect(candidates, verdict_fn, max_probes=max_probes)
+    result = bisect(candidates, verdict_fn, max_probes=max_probes, workers=workers)
 
     minimal_repro: Trace | None = None
     behavioral_diff: BehavioralDiff | None = None

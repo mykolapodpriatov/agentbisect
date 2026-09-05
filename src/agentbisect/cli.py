@@ -195,8 +195,22 @@ def bisect(
             help="Per-candidate timeout in seconds. 0 or omit means no limit.",
         ),
     ] = None,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            help=(
+                "Candidate evaluations in flight at once (default 1 = sequential). "
+                "Buys wall-clock without changing the result, but a wave cannot stop "
+                "early so it costs extra probes, and your AgentRunner must be safe to "
+                "call from several threads."
+            ),
+        ),
+    ] = 1,
 ) -> None:
     """Bisect an axis over a captured bundle and report the first bad change."""
+    if workers < 1:
+        _fail("--workers must be at least 1", EXIT_USAGE)
     if sum((markdown, json_output, html_output)) > 1:
         _fail("--markdown, --json, and --html are mutually exclusive", EXIT_USAGE)
     if max_probes is not None and max_probes < 2:
@@ -230,6 +244,7 @@ def bisect(
             passthrough_executor=passthrough_executor,
             max_probes=max_probes,
             timeout=timeout,
+            workers=workers,
         )
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
