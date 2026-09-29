@@ -864,6 +864,174 @@ def test_report_command_nonmonotonic_bisect_error(tmp_path: Path) -> None:
     assert res.exit_code == 3, res.output
 
 
+# ---------------------------------------------- report parity with bisect (issue #21)
+# report runs the exact same run_bisection() as bisect, so --max-probes/--timeout/--workers
+# must behave identically; these mirror the equivalent bisect tests above.
+
+
+def test_report_max_probes_stops_with_stop_reason(tmp_path: Path) -> None:
+    """A 7-candidate axis with --max-probes 3 stops after 3 verdicts, reported as such."""
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=yes,refund=yes,refund=no,refund=no,refund=no,refund=no",
+            "--max-probes",
+            "3",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["probes"] == 3
+    assert data["first_bad"] is None
+    assert data["stop_reason"] is not None
+    assert "max-probes" in data["stop_reason"]
+
+
+def test_report_max_probes_less_than_two_is_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--max-probes",
+            "1",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+    assert "max-probes" in res.output.lower()
+
+
+def test_report_timeout_overrun_never_reports_first_bad(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stub that expires instantly makes every candidate skip; report never claims first-bad."""
+    from agentbisect.timeout import expire_after, run_with_timeout
+
+    def stub(fn, seconds, *, impl=None):  # type: ignore[no-untyped-def]
+        return run_with_timeout(fn, seconds, impl=expire_after(99.0))
+
+    monkeypatch.setattr("agentbisect.timeout.run_with_timeout", stub)
+
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=no",
+            "--timeout",
+            "0.5",
+        ],
+    )
+    assert res.exit_code == 3, res.output
+    assert "skip" in res.output.lower()
+    assert "First bad change" not in res.output
+
+
+def test_report_negative_timeout_is_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--timeout",
+            "-1",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+
+
+def test_report_workers_matches_sequential_first_bad(tmp_path: Path) -> None:
+    """--workers > 1 finds the same first-bad change as the sequential default."""
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "params",
+            "--over",
+            "final=refund=yes,refund=yes,refund=no,refund=no",
+            "--workers",
+            "2",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["first_bad"] == "final=refund=no"
+
+
+def test_report_workers_less_than_one_is_usage_error(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    out = tmp_path / "bundle"
+    runner.invoke(app, ["capture", "--config", str(cfg), "--out", str(out)])
+    res = runner.invoke(
+        app,
+        [
+            "report",
+            "--bundle",
+            str(out),
+            "--config",
+            str(cfg),
+            "--axis",
+            "model",
+            "--over",
+            "m0,m1",
+            "--workers",
+            "0",
+        ],
+    )
+    assert res.exit_code == 4, res.output
+    assert "workers" in res.output.lower()
+
+
 # ---------------------------------------------- --policy passthrough CLI wiring (issue #9)
 
 
