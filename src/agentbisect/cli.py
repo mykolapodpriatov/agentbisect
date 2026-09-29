@@ -394,10 +394,42 @@ def report(
     html_output: Annotated[
         bool, typer.Option("--html", help="Emit a self-contained static HTML report.")
     ] = False,
+    max_probes: Annotated[
+        int | None,
+        typer.Option(
+            "--max-probes",
+            help="Hard cap on verdict probes, including both endpoints. Omit for no cap.",
+        ),
+    ] = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout",
+            help="Per-candidate timeout in seconds. 0 or omit means no limit.",
+        ),
+    ] = None,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            help=(
+                "Candidate evaluations in flight at once (default 1 = sequential). "
+                "Buys wall-clock without changing the result, but a wave cannot stop "
+                "early so it costs extra probes, and your AgentRunner must be safe to "
+                "call from several threads."
+            ),
+        ),
+    ] = 1,
 ) -> None:
     """Run a bisection and emit a culprit report (Markdown by default, or ``--json``/``--html``)."""
     if sum((markdown, json_output, html_output)) > 1:
         _fail("--markdown, --json, and --html are mutually exclusive", EXIT_USAGE)
+    if workers < 1:
+        _fail("--workers must be at least 1", EXIT_USAGE)
+    if max_probes is not None and max_probes < 2:
+        _fail("--max-probes must be at least 2 (both endpoints must be probed)", EXIT_USAGE)
+    if timeout is not None and timeout < 0:
+        _fail("--timeout must be >= 0 (0 means no limit)", EXIT_USAGE)
 
     try:
         run_bundle = load_bundle(bundle)
@@ -421,6 +453,9 @@ def report(
             oracle,
             policy=policy,
             passthrough_executor=passthrough_executor,
+            max_probes=max_probes,
+            timeout=timeout,
+            workers=workers,
         )
     except (UntestableEndpointError, NonMonotonicError) as exc:
         _fail(str(exc), EXIT_BISECT_ERROR)
