@@ -300,6 +300,28 @@ def test_steps_tested_recorded() -> None:
 # --------------------------------------------------------------------- max_probes
 
 
+def test_parallel_probe_cap_is_not_reported_as_all_skip() -> None:
+    """A cap that cuts a parallel wave is a cap, not an all-skip interval.
+
+    Nine candidates, seven skips between a good endpoint and a bad one.
+    max_probes=3 spends two probes on the endpoints, then one on the midpoint
+    skip. workers=4 asks for a wider wave than the remaining budget, so the
+    map comes back short. That used to return the all-skip sentinel and leave
+    stop_reason empty. workers=1 already recorded the cap.
+    """
+    verdicts = [G, S, S, S, S, S, S, S, B]
+    sequential = bisect(_candidates(9), _from_list(verdicts), max_probes=3, workers=1)
+    parallel = bisect(_candidates(9), _from_list(verdicts), max_probes=3, workers=4)
+
+    assert sequential.stop_reason is not None
+    assert "max-probes=3" in sequential.stop_reason
+    assert parallel.stop_reason is not None
+    assert "max-probes=3" in parallel.stop_reason
+    assert parallel.first_bad is None
+    assert parallel.probes <= 3
+    assert sequential.probes <= 3
+
+
 def test_max_probes_stops_after_cap_and_is_ambiguous() -> None:
     """A 7-candidate axis with max_probes=3 stops after 3 verdicts; first_bad is None."""
     calls = {"n": 0}

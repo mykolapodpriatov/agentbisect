@@ -323,8 +323,10 @@ def _probe_with_skip(
         verdicts = memo.get_many(candidates, wave, workers)
         for idx in wave:
             if idx not in verdicts:
-                # The probe cap cut the wave short; nothing further was probed.
-                return None, None
+                # The probe cap cut the wave short. Returning no verdict here
+                # would look like the whole open interval was skip, and the
+                # search would stop without recording the cap.
+                raise _ProbeCapReached
             if verdicts[idx] is not Verdict.SKIP:
                 return verdicts[idx], idx
     return None, None
